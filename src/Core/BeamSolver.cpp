@@ -21,7 +21,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     xks = 1;  // default value in the case that no field is defined
 
     for (int i = 0; i < field->size(); i++) {
-        auto pfld = field->at(i);
+        auto pfld = (*field)[i];
         int harm = pfld->getHarm();
         if ((harm == 1) || !onlyFundamental) {
             xks = pfld->xks / static_cast<double>(harm);    // fundamental field wavenumber used in ODE below
@@ -47,12 +47,12 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     // Runge Kutta solver to advance particle
     auto gammaz2 = und->getGammaRef()*und->getGammaRef()/(1+aw*aw);
     for (int is = 0; is < beam->beam.size(); is++) {
-        auto &beam_is = beam->beam.at(is);
+        auto &beam_is = beam->beam[is];
         // accumulate space charge field
         double eloss = -beam->longESC[is] / 511000; // convert eV to units of electron rest mass
-        efield.shortRange(&beam_is, beam->current.at(is), gammaz2, is);
+        efield.shortRange(&beam_is, beam->current[is], gammaz2, is);
         for (int ip = 0; ip < beam_is.size(); ip++) {
-            auto &particle = beam->beam.at(is).at(ip);
+            auto &particle = beam_is[ip];
             gamma = particle.gamma;
             theta = particle.theta + autophase; // add autophase here
             double x = particle.x;
@@ -70,7 +70,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
                 auto islice = (is + pfld->first) % pfld->field.size();
 
                 if (pfld->getLLGridpoint(x, y, &wx, &wy, &idx)) { // check whether particle is on grid
-                    auto slc = pfld->field[islice].at(idx);
+                    auto slc = pfld->field[islice][idx];
                     cpart = slc * wx * wy;
                     idx++;
                     cpart += slc * (1 - wx) * wy;
