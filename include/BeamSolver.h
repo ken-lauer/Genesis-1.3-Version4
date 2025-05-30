@@ -36,16 +36,10 @@ private:
     vector<double> rharm;
     vector<complex<double> > rpart;
 
-    double ez{};
-    double xks{}, xku{};
-
-    double theta{}, gamma{}, btpar{};
-    double k2gg{}, k2pp{}, k3gg{}, k3pp{};
-
     bool onlyFundamental;
 
-    void RungeKutta(double);
-    void ODE(double, double);
+    void RungeKutta(double&, double&, double, double, double, double, double);
+    void ODE(double&, double&, double, double, double, double, double, double);
 
     EFieldSolver efield;
     TrackBeam tracker;

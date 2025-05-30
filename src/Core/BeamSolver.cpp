@@ -18,7 +18,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     vector<double> rtmp;
     rpart.clear();
     rharm.clear();
-    xks = 1;  // default value in the case that no field is defined
+    double xks = 1;  // default value in the case that no field is defined
 
     for (int i = 0; i < field->size(); i++) {
         auto pfld = (*field)[i];
@@ -32,7 +32,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
         }
     }
 
-    xku = und->getku();
+    double xku = und->getku();
     if (xku ==
         0) {   // in the case of drifts - the beam stays in phase if it has the reference energy // this requires that the phase slippage is not applied
         xku = xks * 0.5 / und->getGammaRef() / und->getGammaRef();
@@ -53,15 +53,15 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
         efield.shortRange(&beam_is, beam->current[is], gammaz2, is);
         for (int ip = 0; ip < beam_is.size(); ip++) {
             auto &particle = beam_is[ip];
-            gamma = particle.gamma;
-            theta = particle.theta + autophase; // add autophase here
+            double gamma = particle.gamma;
+            double theta = particle.theta + autophase; // add autophase here
             double x = particle.x;
             double y = particle.y;
             double px = particle.px;
             double py = particle.py;
             double awloc = und->faw(x, y);                 // get the transverse dependence of the undulator field
-            btpar = 1 + px * px + py * py + aw * aw * awloc * awloc;
-            ez = efield.getEField(ip) + eloss;  // adding global long range space charge field to each particle
+            double btpar = 1 + px * px + py * py + aw * aw * awloc * awloc;
+            double ez = efield.getEField(ip) + eloss;  // adding global long range space charge field to each particle
             cpart = 0;
             double wx, wy;
             int idx;
@@ -83,7 +83,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
                     rpart[ifld] = 0;
                 }
             }
-            this->RungeKutta(delz);
+            this->RungeKutta(gamma, theta, delz, btpar, xks, xku, ez);
 
             particle.gamma = gamma;
             particle.theta = theta;
@@ -91,15 +91,14 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     }
 }
 
-void BeamSolver::RungeKutta(double delz) {
+void BeamSolver::RungeKutta(double &gamma, double &theta, double delz, double btpar, double xks, double xku, double ez) {
     // Runge Kutta Solver 4th order - taken from pushp from the old Fortran source
 
-
     // first step
-    k2gg = 0;
-    k2pp = 0;
+    double k2gg = 0;
+    double k2pp = 0;
 
-    this->ODE(gamma, theta);
+    ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez);
 
     // second step
     double stpz = 0.5 * delz;
@@ -107,13 +106,13 @@ void BeamSolver::RungeKutta(double delz) {
     gamma += stpz * k2gg;
     theta += stpz * k2pp;
 
-    k3gg = k2gg;
-    k3pp = k2pp;
+    double k3gg = k2gg;
+    double k3pp = k2pp;
 
     k2gg = 0;
     k2pp = 0;
 
-    this->ODE(gamma, theta);
+    ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez);
 
     // third step
     gamma += stpz * (k2gg - k3gg);
@@ -125,7 +124,7 @@ void BeamSolver::RungeKutta(double delz) {
     k2gg *= -0.5;
     k2pp *= -0.5;
 
-    this->ODE(gamma, theta);
+    ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez);
 
     // fourth step
     stpz = delz;
@@ -139,14 +138,14 @@ void BeamSolver::RungeKutta(double delz) {
     k2gg *= 2;
     k2pp *= 2;
 
-    this->ODE(gamma, theta);
+    ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez);
     gamma += stpz * (k3gg + k2gg / 6.0);
     theta += stpz * (k3pp + k2pp / 6.0);
 
 }
 
 
-void BeamSolver::ODE(double tgam,double tthet) {
+void BeamSolver::ODE(double& k2gg, double& k2pp, double xks, double tgam,double tthet, double btpar, double xku, double ez) {
 
     // differential equation for longitudinal motion
     double ztemp1 = -2. / xks;
