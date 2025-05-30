@@ -152,7 +152,8 @@ void BeamSolver::ODE(double tgam,double tthet) {
     double ztemp1 = -2. / xks;
     complex<double> ctmp = 0;
     for (int i = 0; i < rpart.size(); i++) {
-        ctmp += rpart[i] * complex<double>(cos(rharm[i] * tthet), -sin(rharm[i] * tthet));
+        auto angle = rharm[i] * tthet;
+        ctmp += rpart[i] * complex<double>(cos(angle), -sin(angle));
     }
     double btper0 = btpar + ztemp1 * ctmp.real();   //perpendicular velocity
     double btpar0 = sqrt(1. - btper0 / (tgam * tgam));     //parallel velocity
