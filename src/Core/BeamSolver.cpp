@@ -52,24 +52,20 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
         double eloss = -beam->longESC[is] / 511000; // convert eV to units of electron rest mass
         efield.shortRange(&beam_is, beam->current[is], gammaz2, is);
         for (int ip = 0; ip < beam_is.size(); ip++) {
-            auto &particle = beam_is[ip];
-            double gamma = particle.gamma;
-            double theta = particle.theta + autophase; // add autophase here
-            double x = particle.x;
-            double y = particle.y;
-            double px = particle.px;
-            double py = particle.py;
-            double awloc = und->faw(x, y);                 // get the transverse dependence of the undulator field
-            double btpar = 1 + px * px + py * py + aw * aw * awloc * awloc;
-            double ez = efield.getEField(ip) + eloss;  // adding global long range space charge field to each particle
+            auto &particle = beam->beam[is][ip];
+            double awloc = und->faw(particle.x, particle.y);                 // get the transverse dependence of the undulator field
+            double btpar = 1 + particle.px * particle.px + particle.py * particle.py + aw * aw * awloc * awloc;
+            // adding global long range space charge field to each particle
+            // efield.ez[ip]
+            double ez = efield.getEField(ip) + eloss;
             cpart = 0;
-            double wx, wy;
-            int idx;
             for (int ifld = 0; ifld < nfld.size(); ifld++) {
                 auto pfld = field->at(nfld[ifld]);
                 auto islice = (is + pfld->first) % pfld->field.size();
+                double wx, wy;
+                int idx;
 
-                if (pfld->getLLGridpoint(x, y, &wx, &wy, &idx)) { // check whether particle is on grid
+                if (pfld->getLLGridpoint(particle.x, particle.y, &wx, &wy, &idx)) { // check whether particle is on grid
                     auto slc = pfld->field[islice][idx];
                     cpart = slc * wx * wy;
                     idx++;
@@ -83,8 +79,10 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
                     rpart[ifld] = 0;
                 }
             }
-            this->RungeKutta(gamma, theta, delz, btpar, xks, xku, ez);
 
+            double gamma = particle.gamma;
+            double theta = particle.theta + autophase; // add autophase here
+            this->RungeKutta(gamma, theta, delz, btpar, xks, xku, ez);
             particle.gamma = gamma;
             particle.theta = theta;
         }
