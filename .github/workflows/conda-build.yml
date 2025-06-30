@@ -38,6 +38,12 @@ jobs:
         shell: bash -eo pipefail -l {0}
         run: .github/scripts/build.sh
 
+      - name: Upload Genesis4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.workflow }}
+          path: build/genesis4
+
       - name: Run tests
         shell: bash -eo pipefail -l {0}
         run: .github/scripts/run_tests.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"

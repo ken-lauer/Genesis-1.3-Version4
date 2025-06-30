@@ -33,7 +33,7 @@ jobs:
             libhdf5-dev \
             libopenmpi-dev \
             openmpi-bin
-      
+
       - name: Install system dependencies (Ubuntu) - MPICH
         if: runner.os == 'Linux' && matrix.mpi == 'mpich'
         run: |
@@ -55,7 +55,7 @@ jobs:
             cmake \
             gcc \
             fftw \
-            hdf5 \
+            hdf5-mpi \
             ${{ matrix.mpi }}
 
       - name: Setup MPI environment
@@ -68,17 +68,14 @@ jobs:
       - name: Build Genesis4
         env:
           MPI: ${{ matrix.mpi }}
-        run: |
-          set -xe
+        shell: bash -eo pipefail -l {0}
+        run: .github/scripts/build.sh
 
-          cmake -S . -B build \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_FLAGS="-Wall -Wextra $CMAKE_CXX_FLAGS"
-          
-          make -j -C build
-          
-          ls -la build/genesis4
+      - name: Upload Genesis4 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.workflow }}
+          path: build/genesis4
 
       - name: Run tests
-        run: |
-          .github/scripts/run_tests.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+        run: .github/scripts/run_tests.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
