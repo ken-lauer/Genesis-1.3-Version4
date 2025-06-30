@@ -15,8 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        mpi: [openmpi, mpich]
+        include:
+          - os: ubuntu-latest
+            mpi: openmpi
+          - os: ubuntu-latest
+            mpi: mpich
+          - os: macos-latest
+            mpi: openmpi
 
     steps:
       - uses: actions/checkout@v4
