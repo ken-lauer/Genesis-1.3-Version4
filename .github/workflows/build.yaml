@@ -29,9 +29,8 @@ jobs:
             build-essential \
             pkg-config \
             cmake \
-            gfortran \
-            libfftw3-dev \
-            libhdf5-dev \
+            libfftw3-mpi-dev \
+            libhdf5-openmpi-dev \
             libopenmpi-dev \
             openmpi-bin
 
@@ -43,9 +42,8 @@ jobs:
             build-essential \
             pkg-config \
             cmake \
-            gfortran \
-            libfftw3-dev \
-            libhdf5-dev \
+            libfftw3-mpi-dev \
+            libhdf5-mpich-dev \
             libmpich-dev \
             mpich
 
