@@ -1,4 +1,4 @@
-name: Genesis4 - Build & Test
+name: Genesis4 - System Libraries Build & Test
 
 on:
   push:
@@ -15,13 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            mpi: openmpi
-          - os: ubuntu-latest
-            mpi: mpich
-          - os: macos-latest
-            mpi: openmpi
+        os: [ubuntu-latest, macos-latest]
+        mpi: [openmpi, mpich]
 
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +27,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            pkg-config \
             cmake \
             gfortran \
             libfftw3-dev \
@@ -45,6 +41,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
+            pkg-config \
             cmake \
             gfortran \
             libfftw3-dev \
@@ -60,13 +57,14 @@ jobs:
             cmake \
             gcc \
             fftw \
-            hdf5-mpi \
+            hdf5 \
             ${{ matrix.mpi }}
 
       - name: Setup MPI environment
         run: |
           which mpicc
           which mpicxx
+          which h5pcc
           mpicc --version
           mpicxx --version
 
@@ -79,8 +77,9 @@ jobs:
       - name: Upload Genesis4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ github.workflow }}
+          name: genesis4-${{ matrix.os }}-${{ matrix.mpi }}-system
           path: build/genesis4
 
       - name: Run tests
-        run: .github/scripts/run_tests.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+        run: |
+          .github/scripts/run_tests.sh 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
