@@ -1,4 +1,4 @@
-name: Genesis4 - Conda build & test
+name: Genesis4 - Conda Build & Test
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-conda:
-    name: ${{ matrix.name }}
+    name: conda-${{ matrix.os }}-${{ matrix.mpi }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
