@@ -55,7 +55,7 @@ jobs:
             cmake \
             gcc \
             fftw \
-            hdf5 \
+            hdf5-mpi \
             ${{ matrix.mpi }}
 
       - name: Setup MPI environment

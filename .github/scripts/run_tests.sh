@@ -8,6 +8,4 @@ else
   echo "Genesis4 seems to have built correctly; 'usage' found in output."
 fi
 
-set -xe
-
-echo "(Placeholder for actual tests)"
+# TODO: insert some actual tests here
