@@ -32,14 +32,10 @@ public:
     void checkAllocation(unsigned long i);
 
 private:
-    complex<double> cpart;
     vector<double> rharm;
     vector<complex<double> > rpart;
 
     bool onlyFundamental;
-
-    void RungeKutta(double&, double&, double, double, double, double, double);
-    void ODE(double&, double&, double, double, double, double, double, double);
 
     EFieldSolver efield;
     TrackBeam tracker;

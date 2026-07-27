@@ -11,6 +11,15 @@
 #include "Output.h"
 #include "Setup.h"
 
+#include <xsimd/xsimd.hpp>
+
+namespace {
+
+using dbatch = xsimd::batch<double>;
+constexpr int dbatch_width = static_cast<int>(dbatch::size);
+
+} // namespace
+
 Diagnostic::Diagnostic()
 {
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank_);
@@ -425,14 +434,26 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
             py2 += par.py * par.py;
             xpx += par.x * par.px;
             ypy += par.y * par.py;
-//           complex<double> phasor = complex<double> (cos(par.theta),sin(par.theta));
-//           complex<double> phasor_acc = phasor;
-//           b[0] += phasor;
-            for (int iharm = 0; iharm < nharm; iharm++) {
-                //              phasor_acc *= phasor;
-//               b[iharm]+=phasor_acc;
-                b[iharm] += complex<double>(cos((iharm + 1) * par.theta), sin((iharm + 1) * par.theta));
-//                b[iharm]+=phasor*phasor;
+        }
+        // bunching phasors, batched over particles
+        {
+            double thv[dbatch_width];
+            const int np = static_cast<int>(slice.size());
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                for (int l = 0; l < dbatch_width; l++) {
+                    thv[l] = slice[ip + l].theta;
+                }
+                const dbatch th = dbatch::load_unaligned(thv);
+                for (int iharm = 0; iharm < nharm; iharm++) {
+                    const auto [s, c] = xsimd::sincos(static_cast<double>(iharm + 1) * th);
+                    b[iharm] += complex<double>(xsimd::reduce_add(c), xsimd::reduce_add(s));
+                }
+            }
+            for (; ip < np; ip++) {
+                for (int iharm = 0; iharm < nharm; iharm++) {
+                    b[iharm] += complex<double>(cos((iharm + 1) * slice[ip].theta), sin((iharm + 1) * slice[ip].theta));
+                }
             }
         }
         if (filter["aux"]) {

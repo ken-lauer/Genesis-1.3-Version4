@@ -2,6 +2,25 @@
 #include "Field.h"
 #include "Beam.h"
 
+#include <xsimd/xsimd.hpp>
+
+#include <algorithm>
+
+namespace {
+
+using cbatch = xsimd::batch<std::complex<double>>;
+constexpr int cbatch_width = static_cast<int>(cbatch::size);
+
+using dbatch = xsimd::batch<double>;
+constexpr int dbatch_width = static_cast<int>(dbatch::size);
+
+// r = source + field + cstep*(sum_of_neighbors - 2*field)
+inline cbatch stencil(const cbatch &s, const cbatch &f, const cbatch &neigh, const cbatch &vstep)
+{
+    return s + f + vstep * (neigh - f - f);
+}
+
+} // namespace
 
 
 FieldSolverADI::~FieldSolverADI() = default;
@@ -11,42 +30,66 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
     for (unsigned long ii = 0; ii < field->field.size(); ii++) {  // ii is index for the beam
 
         // clear source term
-        for (int ig = 0; ig < ngrid * ngrid; ig++) {
-            crsource[ig] = 0;
-        }
+        std::fill(crsource.begin(), crsource.end(), complex<double>(0));
 
         // constructing source term
         int harm = field->getHarm();
         if (und->inUndulator() && field->isEnabled() && (harm % 2 == 1)) { // do not need to calculate for even harmonics
             double scl = und->fc(harm) * vacimp * beam->current[ii] * field->xks * delz;
             scl /= 4 * eev * static_cast<double>(beam->beam[ii].size()) * field->dgrid * field->dgrid;
-            complex<double> cpart;
-            double part, weight, wx, wy;
-            int idx;
 
-            for (auto & particle : beam->beam.at(ii)) {
-                double x = particle.x;
-                double y = particle.y;
-                double theta = static_cast<double>(harm) * particle.theta;
-                double gamma = particle.gamma;
+            // scatter one particle onto its four surrounding grid points
+            auto deposit = [&](const complex<double> &cpart, double wx, double wy, int idx) {
+                crsource[idx] += wx * wy * cpart;
+                crsource[idx + 1] += (1 - wx) * wy * cpart;
+                idx += ngrid;
+                crsource[idx] += wx * (1 - wy) * cpart;
+                crsource[idx + 1] += (1 - wx) * (1 - wy) * cpart;
+            };
 
-                if (field->getLLGridpoint(x, y, &wx, &wy, &idx)) {
+            auto &particles = beam->beam.at(ii);
+            const int np = static_cast<int>(particles.size());
+            double wxv[dbatch_width], wyv[dbatch_width];
+            double thv[dbatch_width], gmv[dbatch_width], f2v[dbatch_width];
+            double rev[dbatch_width], imv[dbatch_width];
+            int idxv[dbatch_width];
+            bool onv[dbatch_width];
 
-                    part = sqrt(und->faw2(x, y)) * scl / gamma;
+            int ip = 0;
+            // batched path: sincos/sqrt/div on full batches, grid lookup and
+            // scatter scalar per lane
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                for (int l = 0; l < dbatch_width; l++) {
+                    auto &particle = particles[ip + l];
+                    onv[l] = field->getLLGridpoint(particle.x, particle.y, &wxv[l], &wyv[l], &idxv[l]);
+                    f2v[l] = onv[l] ? und->faw2(particle.x, particle.y) : 0;
+                    thv[l] = static_cast<double>(harm) * particle.theta;
+                    gmv[l] = particle.gamma;
+                }
+
+                const auto [s, c] = xsimd::sincos(dbatch::load_unaligned(thv));
+                // tmp  should be also normalized with beta parallel
+                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_unaligned(gmv);
+                (s * part).store_unaligned(rev);
+                (c * part).store_unaligned(imv);
+
+                for (int l = 0; l < dbatch_width; l++) {
+                    if (onv[l]) {
+                        deposit(complex<double>(rev[l], imv[l]), wxv[l], wyv[l], idxv[l]);
+                    }
+                }
+            }
+            // scalar remainder
+            for (; ip < np; ip++) {
+                auto &particle = particles[ip];
+                double wx, wy;
+                int idx;
+
+                if (field->getLLGridpoint(particle.x, particle.y, &wx, &wy, &idx)) {
+                    double theta = static_cast<double>(harm) * particle.theta;
+                    double part = sqrt(und->faw2(particle.x, particle.y)) * scl / particle.gamma;
                     // tmp  should be also normalized with beta parallel
-                    cpart = complex<double>(sin(theta), cos(theta)) * part;
-
-                    weight = wx * wy;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * wy;
-                    idx++;
-                    crsource[idx] += weight * cpart;
-                    weight = wx * (1 - wy);
-                    idx += ngrid - 1;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * (1 - wy);
-                    idx++;
-                    crsource[idx] += weight * cpart;
+                    deposit(complex<double>(sin(theta), cos(theta)) * part, wx, wy, idx);
                 }
             }
         }  // end of source term construction
@@ -59,30 +102,62 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
 
 void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 {
-  int ix,idx;
-  // implicit direction in x
-  for (idx=0;idx<ngrid;idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]);
+  const int n = static_cast<int>(ngrid);
+  const complex<double> *fld = crfield.data();
+  const complex<double> *src = crsource.data();
+  complex<double> *rp = r.data();
+  const cbatch vstep(cstep);
+
+  // implicit direction in x: neighbors live at +-ngrid, rows are contiguous
+  int idx = 0;
+  for (; idx + cbatch_width <= n; idx += cbatch_width) {
+    const auto f = cbatch::load_unaligned(fld + idx);
+    const auto s = cbatch::load_unaligned(src + idx);
+    const auto up = cbatch::load_unaligned(fld + idx + n);
+    stencil(s, f, up, vstep).store_unaligned(rp + idx);
   }
-  for (idx=ngrid;idx<ngrid*(ngrid-1);idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]+crfield[idx-ngrid]);
+  for (; idx < n; idx++) {
+    rp[idx] = src[idx] + fld[idx] + cstep * (fld[idx + n] - 2.0 * fld[idx]);
   }
-  for (idx=ngrid*(ngrid-1);idx<ngrid*ngrid;idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-ngrid]-2.0*crfield[idx]);
+
+  for (idx = n; idx + cbatch_width <= n * (n - 1); idx += cbatch_width) {
+    const auto f = cbatch::load_unaligned(fld + idx);
+    const auto s = cbatch::load_unaligned(src + idx);
+    const auto neigh = cbatch::load_unaligned(fld + idx + n) + cbatch::load_unaligned(fld + idx - n);
+    stencil(s, f, neigh, vstep).store_unaligned(rp + idx);
+  }
+  for (; idx < n * (n - 1); idx++) {
+    rp[idx] = src[idx] + fld[idx] + cstep * (fld[idx + n] - 2.0 * fld[idx] + fld[idx - n]);
+  }
+
+  for (idx = n * (n - 1); idx + cbatch_width <= n * n; idx += cbatch_width) {
+    const auto f = cbatch::load_unaligned(fld + idx);
+    const auto s = cbatch::load_unaligned(src + idx);
+    const auto dn = cbatch::load_unaligned(fld + idx - n);
+    stencil(s, f, dn, vstep).store_unaligned(rp + idx);
+  }
+  for (; idx < n * n; idx++) {
+    rp[idx] = src[idx] + fld[idx] + cstep * (fld[idx - n] - 2.0 * fld[idx]);
   }
 
   // solve tridiagonal system in x
   this->tridagx(crfield);
 
-  // implicit direction in y
-  for(ix=0;ix<ngrid*ngrid;ix+=ngrid){
-    idx=ix;
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]);
-    for(idx=ix+1;idx<ix+ngrid-1;idx++){
-      r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]+crfield[idx-1]);
+  // implicit direction in y: neighbors live at +-1 within each contiguous row
+  for (int ix = 0; ix < n * n; ix += n) {
+    rp[ix] = src[ix] + fld[ix] + cstep * (fld[ix + 1] - 2.0 * fld[ix]);
+    int i = ix + 1;
+    for (; i + cbatch_width <= ix + n - 1; i += cbatch_width) {
+      const auto f = cbatch::load_unaligned(fld + i);
+      const auto s = cbatch::load_unaligned(src + i);
+      const auto neigh = cbatch::load_unaligned(fld + i + 1) + cbatch::load_unaligned(fld + i - 1);
+      stencil(s, f, neigh, vstep).store_unaligned(rp + i);
     }
-    idx=ix+ngrid-1;
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-1]-2.0*crfield[idx]);
+    for (; i < ix + n - 1; i++) {
+      rp[i] = src[i] + fld[i] + cstep * (fld[i + 1] - 2.0 * fld[i] + fld[i - 1]);
+    }
+    const int last = ix + n - 1;
+    rp[last] = src[last] + fld[last] + cstep * (fld[last - 1] - 2.0 * fld[last]);
   }
 
   // solve tridiagonal system in y
@@ -91,32 +166,120 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 }
 
 
+// The recurrence runs along the contiguous (x) dimension, so lanes are filled
+// with cbatch_width independent rows instead; the recurrence value stays in
+// registers across k. Two row-blocks advance together so their serial
+// mul-add chains overlap (single-chain throughput is latency-bound).
 void FieldSolverADI::tridagx(vector<complex<double > > &u) {
-    for (int i = 0; i < ngrid * ngrid; i += ngrid) {
-        u[i] = r[i] * cbet[0];
-        for (int k = 1; k < ngrid; k++) {
-            u[k + i] = (r[k + i] - c[k] * u[k + i - 1]) * cbet[k];
+    const int n = static_cast<int>(ngrid);
+    complex<double> *up = u.data();
+    const complex<double> *rp = r.data();
+    complex<double> lane[cbatch_width];
+
+    auto gather = [&](const complex<double> *p, int base, int k) {
+        for (int l = 0; l < cbatch_width; l++) {
+            lane[l] = p[base + l * n + k];
         }
-        for (int k = ngrid - 2; k >= 0; k--) {
-            u[k + i] -= cwet[k + 1] * u[k + i + 1];
+        return cbatch::load_unaligned(lane);
+    };
+    auto scatter = [&](const cbatch &b, int base, int k) {
+        b.store_unaligned(lane);
+        for (int l = 0; l < cbatch_width; l++) {
+            up[base + l * n + k] = lane[l];
+        }
+    };
+
+    int row = 0;
+    for (; row + 2 * cbatch_width <= n; row += 2 * cbatch_width) {
+        const int b0 = row * n;
+        const int b1 = (row + cbatch_width) * n;
+        cbatch uk0 = gather(rp, b0, 0) * cbatch(cbet[0]);
+        cbatch uk1 = gather(rp, b1, 0) * cbatch(cbet[0]);
+        scatter(uk0, b0, 0);
+        scatter(uk1, b1, 0);
+        for (int k = 1; k < n; k++) {
+            const cbatch ck(c[k]);
+            const cbatch bk(cbet[k]);
+            uk0 = (gather(rp, b0, k) - ck * uk0) * bk;
+            uk1 = (gather(rp, b1, k) - ck * uk1) * bk;
+            scatter(uk0, b0, k);
+            scatter(uk1, b1, k);
+        }
+        for (int k = n - 2; k >= 0; k--) {
+            const cbatch wk(cwet[k + 1]);
+            uk0 = gather(up, b0, k) - wk * uk0;
+            uk1 = gather(up, b1, k) - wk * uk1;
+            scatter(uk0, b0, k);
+            scatter(uk1, b1, k);
+        }
+    }
+    for (; row + cbatch_width <= n; row += cbatch_width) {
+        const int base = row * n;
+        cbatch uk = gather(rp, base, 0) * cbatch(cbet[0]);
+        scatter(uk, base, 0);
+        for (int k = 1; k < n; k++) {
+            uk = (gather(rp, base, k) - cbatch(c[k]) * uk) * cbatch(cbet[k]);
+            scatter(uk, base, k);
+        }
+        for (int k = n - 2; k >= 0; k--) {
+            uk = gather(up, base, k) - cbatch(cwet[k + 1]) * uk;
+            scatter(uk, base, k);
+        }
+    }
+    for (; row < n; row++) {
+        const int i = row * n;
+        up[i] = rp[i] * cbet[0];
+        for (int k = 1; k < n; k++) {
+            up[k + i] = (rp[k + i] - c[k] * up[k + i - 1]) * cbet[k];
+        }
+        for (int k = n - 2; k >= 0; k--) {
+            up[k + i] -= cwet[k + 1] * up[k + i + 1];
         }
     }
 }
 
+// The recurrences run across rows (k), so each contiguous inner i-loop is
+// independent and vectorizes directly.
 void FieldSolverADI::tridagy(vector<complex<double > > &u) {
-    for (int i = 0; i < ngrid; i++) {
-        u[i] = r[i] * cbet[0];
-    }
-    for (int k = 1; k < ngrid; k++) {
-        int n = k * ngrid;
-        for (int i = 0; i < ngrid; i++) {
-            u[n + i] = (r[n + i] - c[k] * u[n + i - ngrid]) * cbet[k];
+    const int n = static_cast<int>(ngrid);
+    complex<double> *up = u.data();
+    const complex<double> *rp = r.data();
+
+    {
+        const cbatch b0(cbet[0]);
+        int i = 0;
+        for (; i + cbatch_width <= n; i += cbatch_width) {
+            (cbatch::load_unaligned(rp + i) * b0).store_unaligned(up + i);
+        }
+        for (; i < n; i++) {
+            up[i] = rp[i] * cbet[0];
         }
     }
-    for (int k = ngrid - 2; k >= 0; k--) {
-        int n = k * ngrid;
-        for (int i = 0; i < ngrid; i++) {
-            u[n + i] -= cwet[k + 1] * u[n + i + ngrid];
+    for (int k = 1; k < n; k++) {
+        const int off = k * n;
+        const cbatch ck(c[k]);
+        const cbatch bk(cbet[k]);
+        int i = 0;
+        for (; i + cbatch_width <= n; i += cbatch_width) {
+            const auto prev = cbatch::load_unaligned(up + off - n + i);
+            const auto rr = cbatch::load_unaligned(rp + off + i);
+            ((rr - ck * prev) * bk).store_unaligned(up + off + i);
+        }
+        for (; i < n; i++) {
+            up[off + i] = (rp[off + i] - c[k] * up[off + i - n]) * cbet[k];
+        }
+    }
+    for (int k = n - 2; k >= 0; k--) {
+        const int off = k * n;
+        const cbatch wk(cwet[k + 1]);
+        int i = 0;
+        for (; i + cbatch_width <= n; i += cbatch_width) {
+            const auto cur = cbatch::load_unaligned(up + off + i);
+            const auto nxt = cbatch::load_unaligned(up + off + n + i);
+            (cur - wk * nxt).store_unaligned(up + off + i);
+        }
+        for (; i < n; i++) {
+            up[off + i] -= cwet[k + 1] * up[off + i + n];
         }
     }
 }

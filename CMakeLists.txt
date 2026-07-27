@@ -74,6 +74,15 @@ else()
 endif()
 
 
+# xsimd (header-only) for the vectorized ADI field solver
+find_path(XSIMD_INCLUDE_DIR xsimd/xsimd.hpp HINTS $ENV{CONDA_PREFIX}/include)
+if (XSIMD_INCLUDE_DIR)
+    message(STATUS "xsimd found: ${XSIMD_INCLUDE_DIR}")
+    include_directories(${XSIMD_INCLUDE_DIR})
+else()
+    message(FATAL_ERROR "xsimd headers not found (checked CONDA_PREFIX/include)")
+endif()
+
 if(USE_DPI)
    set(SRC_DPI src/Main/RegPlugin.cpp src/Core/DiagnosticHook.cpp src/Core/DiagnosticHookBeam.cpp src/Core/DiagnosticHookLI.cpp)
 endif()
