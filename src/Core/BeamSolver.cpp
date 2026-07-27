@@ -66,14 +66,14 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
                 int idx;
 
                 if (pfld->getLLGridpoint(particle.x, particle.y, &wx, &wy, &idx)) { // check whether particle is on grid
-                    auto slc = pfld->field[islice][idx];
-                    cpart = slc * wx * wy;
+                    auto slc = pfld->field[islice];
+                    cpart = slc[idx] * wx * wy;
                     idx++;
-                    cpart += slc * (1 - wx) * wy;
+                    cpart += slc[idx] * (1 - wx) * wy;
                     idx += pfld->ngrid - 1;
-                    cpart += slc * wx * (1 - wy);
+                    cpart += slc[idx] * wx * (1 - wy);
                     idx++;
-                    cpart += slc * (1 - wx) * (1 - wy);
+                    cpart += slc[idx] * (1 - wx) * (1 - wy);
                     rpart[ifld] = rtmp[ifld] * awloc * conj(cpart);
                 } else {
                     rpart[ifld] = 0;
