@@ -74,6 +74,12 @@ else()
 endif()
 
 
+# keep frame pointers so perf/xctrace get reliable call stacks with -O3
+option(ENABLE_PROFILING "Keep frame pointers for profiling" OFF)
+if(ENABLE_PROFILING)
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
+
 # xsimd (header-only) for the vectorized ADI field solver
 find_path(XSIMD_INCLUDE_DIR xsimd/xsimd.hpp HINTS $ENV{CONDA_PREFIX}/include)
 if (XSIMD_INCLUDE_DIR)
