@@ -78,7 +78,8 @@ if(USE_DPI)
    set(SRC_DPI src/Main/RegPlugin.cpp src/Core/DiagnosticHook.cpp src/Core/DiagnosticHookBeam.cpp src/Core/DiagnosticHookLI.cpp)
 endif()
 
-
+option(UPDATE_VERSION "Update version.h" ON)
+if (UPDATE_VERSION)
 add_custom_command(
     OUTPUT
     ${CMAKE_CURRENT_BINARY_DIR}/include/version.h
@@ -88,6 +89,7 @@ add_custom_command(
     WORKING_DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+endif()
 
 add_custom_target(
     get_git_hash
