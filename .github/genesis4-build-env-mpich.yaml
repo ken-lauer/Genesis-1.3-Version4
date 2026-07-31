@@ -8,3 +8,4 @@ dependencies:
   - fftw * mpi_mpich*
   - hdf5 * mpi_mpich*
   - mpich
+  - xsimd

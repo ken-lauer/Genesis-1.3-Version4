@@ -37,7 +37,8 @@ jobs:
             libfftw3-mpi-dev \
             libhdf5-openmpi-dev \
             libopenmpi-dev \
-            openmpi-bin
+            openmpi-bin \
+            libxsimd-dev
 
       - name: Install system dependencies (Ubuntu) - MPICH
         if: runner.os == 'Linux' && matrix.mpi == 'mpich'
@@ -50,7 +51,8 @@ jobs:
             libfftw3-mpi-dev \
             libhdf5-mpich-dev \
             libmpich-dev \
-            mpich
+            mpich \
+            libxsimd-dev
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
