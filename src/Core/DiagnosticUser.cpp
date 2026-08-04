@@ -90,28 +90,17 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
             }
             gamavg *= norm;
 
-            // loop over the particles in each slice, sincos batched; a
-            // reduction, so the final (padded) batch masks out the tail lanes
+            // loop over the particles in each slice, sincos batched
             {
                 const double *g_s = slice.gamma();
                 const double *th_s = slice.theta();
-                const int np = static_cast<int>(slice.size());
-                dbatch acc_re(0.);
-                dbatch acc_im(0.);
-                auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
+                const auto [re, im] = batch_sum<2>(static_cast<int>(slice.size()),
+                                                   [&](int ip) -> std::array<dbatch, 2> {
                     const auto [s, c] = xsimd::sincos(dbatch::load_aligned(th_s + ip));
-                    const dbatch dg = xsimd::select(m, dbatch::load_aligned(g_s + ip) - gamavg, dbatch(0.));
-                    acc_re += dg * c;
-                    acc_im += dg * s;
-                };
-                int ip = 0;
-                for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                    accumulate(ip, xsimd::batch_bool<double>(true));
-                }
-                if (ip < np) {
-                    accumulate(ip, tail_mask(np - ip));
-                }
-                emod = complex<double>(xsimd::reduce_add(acc_re), xsimd::reduce_add(acc_im));
+                    const dbatch dg = dbatch::load_aligned(g_s + ip) - gamavg;
+                    return {dg * c, dg * s};
+                });
+                emod = complex<double>(re, im);
             }
             emod *= norm;
 

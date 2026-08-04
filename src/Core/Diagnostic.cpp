@@ -414,75 +414,42 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
-        // beam moments, batched over particles; these are reductions, so the
-        // final (padded) batch masks out the tail lanes
+        // beam moments, batched over particles
         {
             const double *x_s = slice.x();
             const double *y_s = slice.y();
             const double *px_s = slice.px();
             const double *py_s = slice.py();
             const double *g_s = slice.gamma();
-            const int np = static_cast<int>(slice.size());
-            dbatch bx1(0.), bx2(0.), by1(0.), by2(0.), bg1(0.), bg2(0.);
-            dbatch bpx1(0.), bpy1(0.), bpx2(0.), bpy2(0.), bxpx(0.), bypy(0.);
-            auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
-                const dbatch zero(0.);
-                const dbatch x = xsimd::select(m, dbatch::load_aligned(x_s + ip), zero);
-                const dbatch y = xsimd::select(m, dbatch::load_aligned(y_s + ip), zero);
-                const dbatch px = xsimd::select(m, dbatch::load_aligned(px_s + ip), zero);
-                const dbatch py = xsimd::select(m, dbatch::load_aligned(py_s + ip), zero);
-                const dbatch g = xsimd::select(m, dbatch::load_aligned(g_s + ip), zero);
-                bx1 += x;
-                bx2 += x * x;
-                by1 += y;
-                by2 += y * y;
-                bg1 += g;
-                bg2 += g * g;
-                bpx1 += px;
-                bpy1 += py;
-                bpx2 += px * px;
-                bpy2 += py * py;
-                bxpx += x * px;
-                bypy += y * py;
-            };
-            int ip = 0;
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                accumulate(ip, xsimd::batch_bool<double>(true));
-            }
-            if (ip < np) {
-                accumulate(ip, tail_mask(np - ip));
-            }
-            x1 = xsimd::reduce_add(bx1);
-            x2 = xsimd::reduce_add(bx2);
-            y1 = xsimd::reduce_add(by1);
-            y2 = xsimd::reduce_add(by2);
-            g1 = xsimd::reduce_add(bg1);
-            g2 = xsimd::reduce_add(bg2);
-            px1 = xsimd::reduce_add(bpx1);
-            py1 = xsimd::reduce_add(bpy1);
-            px2 = xsimd::reduce_add(bpx2);
-            py2 = xsimd::reduce_add(bpy2);
-            xpx = xsimd::reduce_add(bxpx);
-            ypy = xsimd::reduce_add(bypy);
+            const auto sums = batch_sum<12>(static_cast<int>(slice.size()),
+                                            [&](int ip) -> std::array<dbatch, 12> {
+                const dbatch x = dbatch::load_aligned(x_s + ip);
+                const dbatch y = dbatch::load_aligned(y_s + ip);
+                const dbatch px = dbatch::load_aligned(px_s + ip);
+                const dbatch py = dbatch::load_aligned(py_s + ip);
+                const dbatch g = dbatch::load_aligned(g_s + ip);
+                return {x, x * x, y, y * y, g, g * g,
+                        px, py, px * px, py * py, x * px, y * py};
+            });
+            x1 = sums[0]; x2 = sums[1];
+            y1 = sums[2]; y2 = sums[3];
+            g1 = sums[4]; g2 = sums[5];
+            px1 = sums[6]; py1 = sums[7];
+            px2 = sums[8]; py2 = sums[9];
+            xpx = sums[10]; ypy = sums[11];
         }
-        // bunching phasors, batched over particles; same tail masking
+        // bunching phasors, batched over particles, one pass per harmonic so
+        // the accumulators stay in batch registers
         {
             const double *th_s = slice.theta();
             const int np = static_cast<int>(slice.size());
-            auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
-                const dbatch th = dbatch::load_aligned(th_s + ip);
-                for (int iharm = 0; iharm < nharm; iharm++) {
-                    const auto [s, c] = xsimd::sincos(static_cast<double>(iharm + 1) * th);
-                    b[iharm] += complex<double>(xsimd::reduce_add(xsimd::select(m, c, dbatch(0.))),
-                                                xsimd::reduce_add(xsimd::select(m, s, dbatch(0.))));
-                }
-            };
-            int ip = 0;
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                accumulate(ip, xsimd::batch_bool<double>(true));
-            }
-            if (ip < np) {
-                accumulate(ip, tail_mask(np - ip));
+            for (int iharm = 0; iharm < nharm; iharm++) {
+                const double h = static_cast<double>(iharm + 1);
+                const auto [re, im] = batch_sum<2>(np, [&](int ip) -> std::array<dbatch, 2> {
+                    const auto [s, c] = xsimd::sincos(h * dbatch::load_aligned(th_s + ip));
+                    return {c, s};
+                });
+                b[iharm] += complex<double>(re, im);
             }
         }
         if (filter["aux"]) {

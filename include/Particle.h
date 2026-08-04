@@ -49,7 +49,7 @@ constexpr std::size_t padded_count(std::size_t n)
 // may therefore always run whole batches: tail lanes compute valid (if
 // redundant) physics and may be stored back freely. Only operations with side
 // effects beyond the arrays themselves - reductions, scatters onto grids -
-// must mask the tail lanes (see tail_mask in SimdBatch.h).
+// must mask the tail lanes (see batch_sum and tail_mask in SimdBatch.h).
 class Particles {
 public:
     struct Ref {

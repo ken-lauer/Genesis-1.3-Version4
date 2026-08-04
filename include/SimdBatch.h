@@ -1,6 +1,7 @@
 #ifndef __GENESIS_SIMDBATCH__
 #define __GENESIS_SIMDBATCH__
 
+#include <array>
 #include <complex>
 #include <cstddef>
 
@@ -34,6 +35,36 @@ inline xsimd::batch_bool<double> tail_mask(std::size_t count)
                                                                     4., 5., 6., 7.};
     static_assert(particles_simd_pad == 8, "iota table must match the pad width");
     return dbatch::load_aligned(iota) < dbatch(static_cast<double>(count));
+}
+
+// Reduction over the first np entries of padded particle arrays: body(ip)
+// returns N batches of per-lane contributions, batch_sum returns their N
+// horizontal sums. Whole batches accumulate unmasked (padding makes the loads
+// valid); only the final partial batch is masked so tail lanes contribute
+// nothing. Usage:
+//
+//   auto [s1, s2] = batch_sum<2>(np, [&](int ip) -> std::array<dbatch, 2> {
+//       const dbatch x = dbatch::load_aligned(x_s + ip);
+//       return {x, x * x};
+//   });
+template <std::size_t N, class F>
+std::array<double, N> batch_sum(int np, F &&body)
+{
+    std::array<dbatch, N> acc;
+    acc.fill(dbatch(0.));
+    int ip = 0;
+    for (; ip + dbatch_width <= np; ip += dbatch_width) {
+        const std::array<dbatch, N> v = body(ip);
+        for (std::size_t j = 0; j < N; j++) { acc[j] += v[j]; }
+    }
+    if (ip < np) {
+        const auto m = tail_mask(np - ip);
+        const std::array<dbatch, N> v = body(ip);
+        for (std::size_t j = 0; j < N; j++) { acc[j] += xsimd::select(m, v[j], dbatch(0.)); }
+    }
+    std::array<double, N> out;
+    for (std::size_t j = 0; j < N; j++) { out[j] = xsimd::reduce_add(acc[j]); }
+    return out;
 }
 
 #endif
