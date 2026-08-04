@@ -96,7 +96,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     for (int is = 0; is < beam->beam.size(); is++) {
         auto &beam_is = beam->beam[is];
         // accumulate space charge field
-        const double eloss = -beam->longESC[is] / 511000; // convert eV to units of electron rest mass
+        const double eloss = -beam->longESC[is] / eev; // convert eV to units of electron rest mass
         efield.shortRange(&beam_is, beam->current[is], gammaz2, is);
 
         for (int ifld = 0; ifld < nf; ifld++) {
