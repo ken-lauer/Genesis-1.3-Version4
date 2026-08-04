@@ -421,19 +421,62 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
-        for (auto const &par: slice) {
-            x1 += par.x;
-            x2 += par.x * par.x;
-            y1 += par.y;
-            y2 += par.y * par.y;
-            g1 += par.gamma;
-            g2 += par.gamma * par.gamma;
-            px1 += par.px;
-            py1 += par.py;
-            px2 += par.px * par.px;
-            py2 += par.py * par.py;
-            xpx += par.x * par.px;
-            ypy += par.y * par.py;
+        // beam moments, batched over particles
+        {
+            const double *x_s = slice.x();
+            const double *y_s = slice.y();
+            const double *px_s = slice.px();
+            const double *py_s = slice.py();
+            const double *g_s = slice.gamma();
+            const int np = static_cast<int>(slice.size());
+            dbatch bx1(0.), bx2(0.), by1(0.), by2(0.), bg1(0.), bg2(0.);
+            dbatch bpx1(0.), bpy1(0.), bpx2(0.), bpy2(0.), bxpx(0.), bypy(0.);
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                const dbatch x = dbatch::load_unaligned(x_s + ip);
+                const dbatch y = dbatch::load_unaligned(y_s + ip);
+                const dbatch px = dbatch::load_unaligned(px_s + ip);
+                const dbatch py = dbatch::load_unaligned(py_s + ip);
+                const dbatch g = dbatch::load_unaligned(g_s + ip);
+                bx1 += x;
+                bx2 += x * x;
+                by1 += y;
+                by2 += y * y;
+                bg1 += g;
+                bg2 += g * g;
+                bpx1 += px;
+                bpy1 += py;
+                bpx2 += px * px;
+                bpy2 += py * py;
+                bxpx += x * px;
+                bypy += y * py;
+            }
+            x1 = xsimd::reduce_add(bx1);
+            x2 = xsimd::reduce_add(bx2);
+            y1 = xsimd::reduce_add(by1);
+            y2 = xsimd::reduce_add(by2);
+            g1 = xsimd::reduce_add(bg1);
+            g2 = xsimd::reduce_add(bg2);
+            px1 = xsimd::reduce_add(bpx1);
+            py1 = xsimd::reduce_add(bpy1);
+            px2 = xsimd::reduce_add(bpx2);
+            py2 = xsimd::reduce_add(bpy2);
+            xpx = xsimd::reduce_add(bxpx);
+            ypy = xsimd::reduce_add(bypy);
+            for (; ip < np; ip++) {
+                x1 += x_s[ip];
+                x2 += x_s[ip] * x_s[ip];
+                y1 += y_s[ip];
+                y2 += y_s[ip] * y_s[ip];
+                g1 += g_s[ip];
+                g2 += g_s[ip] * g_s[ip];
+                px1 += px_s[ip];
+                py1 += py_s[ip];
+                px2 += px_s[ip] * px_s[ip];
+                py2 += py_s[ip] * py_s[ip];
+                xpx += x_s[ip] * px_s[ip];
+                ypy += y_s[ip] * py_s[ip];
+            }
         }
         // bunching phasors, batched over particles
         {

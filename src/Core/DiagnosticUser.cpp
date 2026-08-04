@@ -4,6 +4,11 @@
 
 #include "Diagnostic.h"
 
+#include <xsimd/xsimd.hpp>
+
+using dbatch = xsimd::batch<double>;
+constexpr int dbatch_width = static_cast<int>(dbatch::size);
+
 //  This source file works as a template  to allow users to add additional output.
 // the definition is already given in the header file "Diagnostic.h"
 
@@ -71,9 +76,24 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
         }
         gamavg *= norm;
 
-        // loop over the particle in each slice
-        for (auto const &par: slice) {
-            emod += (par.gamma-gamavg) * complex<double>(cos(par.theta),sin(par.theta));
+        // loop over the particles in each slice, sincos batched
+        {
+            const double *g_s = slice.gamma();
+            const double *th_s = slice.theta();
+            const int np = static_cast<int>(slice.size());
+            dbatch acc_re(0.);
+            dbatch acc_im(0.);
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                const auto [s, c] = xsimd::sincos(dbatch::load_unaligned(th_s + ip));
+                const dbatch dg = dbatch::load_unaligned(g_s + ip) - gamavg;
+                acc_re += dg * c;
+                acc_im += dg * s;
+            }
+            emod = complex<double>(xsimd::reduce_add(acc_re), xsimd::reduce_add(acc_im));
+            for (; ip < np; ip++) {
+                emod += (g_s[ip]-gamavg) * complex<double>(cos(th_s[ip]),sin(th_s[ip]));
+            }
         }
         emod *= norm;
 
