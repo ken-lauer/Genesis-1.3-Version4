@@ -1,18 +1,11 @@
 #include "FieldSolverADI.h"
 #include "Field.h"
 #include "Beam.h"
-
-#include <xsimd/xsimd.hpp>
+#include "SimdBatch.h"
 
 #include <algorithm>
 
 namespace {
-
-using cbatch = xsimd::batch<std::complex<double>>;
-constexpr int cbatch_width = static_cast<int>(cbatch::size);
-
-using dbatch = xsimd::batch<double>;
-constexpr int dbatch_width = static_cast<int>(dbatch::size);
 
 // r = source + field + cstep*(sum_of_neighbors - 2*field)
 inline cbatch stencil(const cbatch &s, const cbatch &f, const cbatch &neigh, const cbatch &vstep)
@@ -59,37 +52,27 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             int idxv[dbatch_width];
             bool onv[dbatch_width];
 
-            int ip = 0;
-            // batched path: sincos/sqrt/div on full batches, grid lookup and
-            // scatter scalar per lane
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+            // whole batches over the padded arrays: sincos/sqrt/div on full
+            // batches, grid lookup and scatter scalar per lane. The scatter is
+            // a side effect, so tail lanes (replicas of the last particle)
+            // must not deposit.
+            for (int ip = 0; ip < np; ip += dbatch_width) {
                 for (int l = 0; l < dbatch_width; l++) {
                     onv[l] = field->getLLGridpoint(x_s[ip + l], y_s[ip + l], &wxv[l], &wyv[l], &idxv[l]);
                     f2v[l] = onv[l] ? und->faw2(x_s[ip + l], y_s[ip + l]) : 0;
                 }
 
-                const auto [s, c] = xsimd::sincos(static_cast<double>(harm) * dbatch::load_unaligned(th_s + ip));
+                const auto [s, c] = xsimd::sincos(static_cast<double>(harm) * dbatch::load_aligned(th_s + ip));
                 // tmp  should be also normalized with beta parallel
-                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_unaligned(g_s + ip);
+                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_aligned(g_s + ip);
                 (s * part).store_unaligned(rev);
                 (c * part).store_unaligned(imv);
 
-                for (int l = 0; l < dbatch_width; l++) {
+                const int lanes = std::min(dbatch_width, np - ip);
+                for (int l = 0; l < lanes; l++) {
                     if (onv[l]) {
                         deposit(complex<double>(rev[l], imv[l]), wxv[l], wyv[l], idxv[l]);
                     }
-                }
-            }
-            // scalar remainder
-            for (; ip < np; ip++) {
-                double wx, wy;
-                int idx;
-
-                if (field->getLLGridpoint(x_s[ip], y_s[ip], &wx, &wy, &idx)) {
-                    double theta = static_cast<double>(harm) * th_s[ip];
-                    double part = sqrt(und->faw2(x_s[ip], y_s[ip])) * scl / g_s[ip];
-                    // tmp  should be also normalized with beta parallel
-                    deposit(complex<double>(sin(theta), cos(theta)) * part, wx, wy, idx);
                 }
             }
         }  // end of source term construction

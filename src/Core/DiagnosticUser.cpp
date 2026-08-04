@@ -4,10 +4,7 @@
 
 #include "Diagnostic.h"
 
-#include <xsimd/xsimd.hpp>
-
-using dbatch = xsimd::batch<double>;
-constexpr int dbatch_width = static_cast<int>(dbatch::size);
+#include "SimdBatch.h"
 
 //  This source file works as a template  to allow users to add additional output.
 // the definition is already given in the header file "Diagnostic.h"
@@ -76,24 +73,28 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
         }
         gamavg *= norm;
 
-        // loop over the particles in each slice, sincos batched
+        // loop over the particles in each slice, sincos batched; a reduction,
+        // so the final (padded) batch masks out the tail lanes
         {
             const double *g_s = slice.gamma();
             const double *th_s = slice.theta();
             const int np = static_cast<int>(slice.size());
             dbatch acc_re(0.);
             dbatch acc_im(0.);
-            int ip = 0;
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                const auto [s, c] = xsimd::sincos(dbatch::load_unaligned(th_s + ip));
-                const dbatch dg = dbatch::load_unaligned(g_s + ip) - gamavg;
+            auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
+                const auto [s, c] = xsimd::sincos(dbatch::load_aligned(th_s + ip));
+                const dbatch dg = xsimd::select(m, dbatch::load_aligned(g_s + ip) - gamavg, dbatch(0.));
                 acc_re += dg * c;
                 acc_im += dg * s;
+            };
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                accumulate(ip, xsimd::batch_bool<double>(true));
+            }
+            if (ip < np) {
+                accumulate(ip, tail_mask(np - ip));
             }
             emod = complex<double>(xsimd::reduce_add(acc_re), xsimd::reduce_add(acc_im));
-            for (; ip < np; ip++) {
-                emod += (g_s[ip]-gamavg) * complex<double>(cos(th_s[ip]),sin(th_s[ip]));
-            }
         }
         emod *= norm;
 

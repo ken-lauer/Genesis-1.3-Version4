@@ -1,10 +1,6 @@
 #include "TrackBeam.h"
 #include "Beam.h"
-
-#include <xsimd/xsimd.hpp>
-
-using dbatch = xsimd::batch<double>;
-constexpr int dbatch_width = static_cast<int>(dbatch::size);
+#include "SimdBatch.h"
 
 enum class QuadMode { Drift, Focus, Defocus };
 
@@ -16,11 +12,10 @@ inline QuadMode quadMode(double q)
     return q > 0 ? QuadMode::Focus : QuadMode::Defocus;
 }
 
-// transverse transport through one step, defined below track(); T = double
-// advances one particle, T = dbatch a batch of particles
-template <class T>
-void applyQuad(QuadMode mode, double delz, double qf, T &x, T &px,
-               const T &gammaz, double dx);
+// transverse transport through one step, defined below track(); each lane
+// advances one particle
+void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px,
+               const dbatch &gammaz, double dx);
 
 TrackBeam::TrackBeam(){}
 TrackBeam::~TrackBeam(){}
@@ -74,29 +69,23 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
     double *py_s = slice.py();
     const double *g_s = slice.gamma();
     const int np = static_cast<int>(slice.size());
-    int j = 0;
-    for (; j + dbatch_width <= np; j += dbatch_width) {
-      dbatch x = dbatch::load_unaligned(x_s + j);
-      dbatch px = dbatch::load_unaligned(px_s + j);
-      dbatch y = dbatch::load_unaligned(y_s + j);
-      dbatch py = dbatch::load_unaligned(py_s + j);
-      const dbatch g = dbatch::load_unaligned(g_s + j);
+    // whole batches over the padded arrays; tail lanes replicate the last particle
+    for (int j = 0; j < np; j += dbatch_width) {
+      dbatch x = dbatch::load_aligned(x_s + j);
+      dbatch px = dbatch::load_aligned(px_s + j);
+      dbatch y = dbatch::load_aligned(y_s + j);
+      dbatch py = dbatch::load_aligned(py_s + j);
+      const dbatch g = dbatch::load_aligned(g_s + j);
       const dbatch gammaz = xsimd::sqrt(g * g - 1. - aw * aw - px * px - py * py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
-      applyQuad(modeX, delz, qx, x, px, gammaz, xoff);
-      applyQuad(modeY, delz, qy, y, py, gammaz, yoff);
-      x.store_unaligned(x_s + j);
-      px.store_unaligned(px_s + j);
-      y.store_unaligned(y_s + j);
-      py.store_unaligned(py_s + j);
-    }
-    // scalar remainder
-    for (; j < np; j++) {
-      double gammaz=sqrt(g_s[j]*g_s[j]-1- aw*aw - px_s[j]*px_s[j] - py_s[j]*py_s[j]); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
 #ifdef G4_DBGDIAG
 // G4_DBGDIAG: add test against negative radicand? Note that the particles probably already made lots of noise elsewhere.
 #endif
-      applyQuad(modeX,delz,qx,x_s[j],px_s[j],gammaz,xoff);
-      applyQuad(modeY,delz,qy,y_s[j],py_s[j],gammaz,yoff);
+      applyQuad(modeX, delz, qx, x, px, gammaz, xoff);
+      applyQuad(modeY, delz, qy, y, py, gammaz, yoff);
+      x.store_aligned(x_s + j);
+      px.store_aligned(px_s + j);
+      y.store_aligned(y_s + j);
+      py.store_aligned(py_s + j);
     }
   }
 
@@ -107,31 +96,30 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
 
 
 // the mode is uniform for all particles of a step, so the per-particle math
-// is branch-free; xsimd provides the scalar overloads of sqrt/sincos/cosh/sinh
-template <class T>
-void applyQuad(QuadMode mode, double delz, double qf, T &x, T &px, const T &gammaz, double dx)
+// is branch-free
+void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px, const dbatch &gammaz, double dx)
 {
   if (mode == QuadMode::Drift){
     x+=px*delz/gammaz;
     return;
   }
   if (mode == QuadMode::Focus){
-    T foc=xsimd::sqrt(qf/gammaz);
-    T omg=foc*delz;
+    dbatch foc=xsimd::sqrt(qf/gammaz);
+    dbatch omg=foc*delz;
     const auto [s1, a1]=xsimd::sincos(omg);
-    T a2=s1/foc;
-    T a3=-a2*foc*foc;
-    T xtmp=x-dx;
+    dbatch a2=s1/foc;
+    dbatch a3=-a2*foc*foc;
+    dbatch xtmp=x-dx;
     x =a1*xtmp+a2*px/gammaz+dx;
     px=a3*xtmp*gammaz+a1*px;
     return;
   }
-  T foc=xsimd::sqrt(-qf/gammaz);
-  T omg=foc*delz;
-  T a1=xsimd::cosh(omg);
-  T a2=xsimd::sinh(omg)/foc;
-  T a3=a2*foc*foc;
-  T xtmp=x-dx;
+  dbatch foc=xsimd::sqrt(-qf/gammaz);
+  dbatch omg=foc*delz;
+  dbatch a1=xsimd::cosh(omg);
+  dbatch a2=xsimd::sinh(omg)/foc;
+  dbatch a3=a2*foc*foc;
+  dbatch xtmp=x-dx;
   x =a1*xtmp+a2*px/gammaz+dx;
   px=a3*xtmp*gammaz+a1*px;
 }

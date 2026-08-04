@@ -11,14 +11,7 @@
 #include "Output.h"
 #include "Setup.h"
 
-#include <xsimd/xsimd.hpp>
-
-namespace {
-
-using dbatch = xsimd::batch<double>;
-constexpr int dbatch_width = static_cast<int>(dbatch::size);
-
-} // namespace
+#include "SimdBatch.h"
 
 Diagnostic::Diagnostic()
 {
@@ -421,7 +414,8 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
-        // beam moments, batched over particles
+        // beam moments, batched over particles; these are reductions, so the
+        // final (padded) batch masks out the tail lanes
         {
             const double *x_s = slice.x();
             const double *y_s = slice.y();
@@ -431,13 +425,13 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
             const int np = static_cast<int>(slice.size());
             dbatch bx1(0.), bx2(0.), by1(0.), by2(0.), bg1(0.), bg2(0.);
             dbatch bpx1(0.), bpy1(0.), bpx2(0.), bpy2(0.), bxpx(0.), bypy(0.);
-            int ip = 0;
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                const dbatch x = dbatch::load_unaligned(x_s + ip);
-                const dbatch y = dbatch::load_unaligned(y_s + ip);
-                const dbatch px = dbatch::load_unaligned(px_s + ip);
-                const dbatch py = dbatch::load_unaligned(py_s + ip);
-                const dbatch g = dbatch::load_unaligned(g_s + ip);
+            auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
+                const dbatch zero(0.);
+                const dbatch x = xsimd::select(m, dbatch::load_aligned(x_s + ip), zero);
+                const dbatch y = xsimd::select(m, dbatch::load_aligned(y_s + ip), zero);
+                const dbatch px = xsimd::select(m, dbatch::load_aligned(px_s + ip), zero);
+                const dbatch py = xsimd::select(m, dbatch::load_aligned(py_s + ip), zero);
+                const dbatch g = xsimd::select(m, dbatch::load_aligned(g_s + ip), zero);
                 bx1 += x;
                 bx2 += x * x;
                 by1 += y;
@@ -450,6 +444,13 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
                 bpy2 += py * py;
                 bxpx += x * px;
                 bypy += y * py;
+            };
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                accumulate(ip, xsimd::batch_bool<double>(true));
+            }
+            if (ip < np) {
+                accumulate(ip, tail_mask(np - ip));
             }
             x1 = xsimd::reduce_add(bx1);
             x2 = xsimd::reduce_add(bx2);
@@ -463,37 +464,25 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
             py2 = xsimd::reduce_add(bpy2);
             xpx = xsimd::reduce_add(bxpx);
             ypy = xsimd::reduce_add(bypy);
-            for (; ip < np; ip++) {
-                x1 += x_s[ip];
-                x2 += x_s[ip] * x_s[ip];
-                y1 += y_s[ip];
-                y2 += y_s[ip] * y_s[ip];
-                g1 += g_s[ip];
-                g2 += g_s[ip] * g_s[ip];
-                px1 += px_s[ip];
-                py1 += py_s[ip];
-                px2 += px_s[ip] * px_s[ip];
-                py2 += py_s[ip] * py_s[ip];
-                xpx += x_s[ip] * px_s[ip];
-                ypy += y_s[ip] * py_s[ip];
-            }
         }
-        // bunching phasors, batched over particles
+        // bunching phasors, batched over particles; same tail masking
         {
             const double *th_s = slice.theta();
             const int np = static_cast<int>(slice.size());
-            int ip = 0;
-            for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                const dbatch th = dbatch::load_unaligned(th_s + ip);
+            auto accumulate = [&](int ip, const xsimd::batch_bool<double> &m) {
+                const dbatch th = dbatch::load_aligned(th_s + ip);
                 for (int iharm = 0; iharm < nharm; iharm++) {
                     const auto [s, c] = xsimd::sincos(static_cast<double>(iharm + 1) * th);
-                    b[iharm] += complex<double>(xsimd::reduce_add(c), xsimd::reduce_add(s));
+                    b[iharm] += complex<double>(xsimd::reduce_add(xsimd::select(m, c, dbatch(0.))),
+                                                xsimd::reduce_add(xsimd::select(m, s, dbatch(0.))));
                 }
+            };
+            int ip = 0;
+            for (; ip + dbatch_width <= np; ip += dbatch_width) {
+                accumulate(ip, xsimd::batch_bool<double>(true));
             }
-            for (; ip < np; ip++) {
-                for (int iharm = 0; iharm < nharm; iharm++) {
-                    b[iharm] += complex<double>(cos((iharm + 1) * slice[ip].theta), sin((iharm + 1) * slice[ip].theta));
-                }
+            if (ip < np) {
+                accumulate(ip, tail_mask(np - ip));
             }
         }
         if (filter["aux"]) {

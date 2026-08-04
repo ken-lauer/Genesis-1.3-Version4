@@ -33,7 +33,6 @@ public:
 
 private:
     vector<double> rharm;
-    vector<complex<double> > rpart;
 
     bool onlyFundamental;
 

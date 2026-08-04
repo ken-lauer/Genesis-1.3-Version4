@@ -1,12 +1,7 @@
 #include "BeamSolver.h"
 #include "Field.h"
 #include "Beam.h"
-
-#include <xsimd/xsimd.hpp>
-
-
-using dbatch = xsimd::batch<double>;
-constexpr int dbatch_width = static_cast<int>(dbatch::size);
+#include "SimdBatch.h"
 
 // per-particle field coupling rpart for a batch of particles, SoA with one
 // lane per particle
@@ -23,31 +18,11 @@ struct BatchCoupling {
     }
 };
 
-// same view over the per-particle rpart of the scalar remainder path
-struct ScalarCoupling {
-    const double *rharm;
-    const complex<double> *rp;
-    int nfld;
-
-    std::pair<double, double> rpart(int i) const
-    {
-        return {rp[i].real(), rp[i].imag()};
-    }
-};
-
-#ifdef G4_DBGDIAG
-inline bool anyNegative(double v) { return v < 0.; }
-inline bool anyNegative(const dbatch &v) { return xsimd::any(v < 0.); }
-#endif
-
-// scalar/batch-generic RK4 and ODE, defined below advance(); T = double
-// advances one particle, T = dbatch a batch of particles
-template <class T, class Coupling>
-void RungeKutta(T &gamma, T &theta, double delz, const T &btpar,
-                double xks, double xku, const T &ez, const Coupling &cpl);
-template <class T, class Coupling>
-void ODE(T &k2gg, T &k2pp, double xks, const T &tgam, const T &tthet,
-         const T &btpar, double xku, const T &ez, const Coupling &cpl);
+// batched RK4 and ODE, defined below advance(); each lane advances one particle
+void RungeKutta(dbatch &gamma, dbatch &theta, double delz, const dbatch &btpar,
+                double xks, double xku, const dbatch &ez, const BatchCoupling &cpl);
+void ODE(dbatch &k2gg, dbatch &k2pp, double xks, const dbatch &tgam, const dbatch &tthet,
+         const dbatch &btpar, double xku, const dbatch &ez, const BatchCoupling &cpl);
 
 // bilinear field sample at the particle position, scaled by the coupling
 // constant; zero for particles off the grid
@@ -81,7 +56,6 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
 
     vector<int> nfld;
     vector<double> rtmp;
-    rpart.clear();
     rharm.clear();
     double xks = 1;  // default value in the case that no field is defined
 
@@ -92,7 +66,6 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
             xks = pfld->xks / static_cast<double>(harm);    // fundamental field wavenumber used in ODE below
             nfld.push_back(i);
             rtmp.push_back(und->fc(harm) / pfld->xks);      // here the harmonics have to be taken care
-            rpart.emplace_back(0);
             rharm.push_back(static_cast<double>(harm));
         }
     }
@@ -141,10 +114,10 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
         const double *py_s = beam_is.py();
 
         const int np = static_cast<int>(beam_is.size());
-        int ip = 0;
-        // batched path: field interpolation and undulator lookups stay scalar
-        // per lane, the RK4 (trig/sqrt/div) runs on full batches
-        for (; ip + dbatch_width <= np; ip += dbatch_width) {
+        // whole batches over the padded arrays (tail lanes replicate the last
+        // particle): field interpolation and undulator lookups stay scalar per
+        // lane, the RK4 (trig/sqrt/div) runs on full batches
+        for (int ip = 0; ip < np; ip += dbatch_width) {
             for (int l = 0; l < dbatch_width; l++) {
                 const double awloc = und->faw(x_s[ip + l], y_s[ip + l]);                 // get the transverse dependence of the undulator field
                 btv[l] = 1 + px_s[ip + l] * px_s[ip + l] + py_s[ip + l] * py_s[ip + l] + aw * aw * awloc * awloc;
@@ -158,41 +131,22 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
                 }
             }
 
-            dbatch gamma = dbatch::load_unaligned(g_s + ip);
-            dbatch theta = dbatch::load_unaligned(th_s + ip) + autophase; // add autophase here
+            dbatch gamma = dbatch::load_aligned(g_s + ip);
+            dbatch theta = dbatch::load_aligned(th_s + ip) + autophase; // add autophase here
             RungeKutta(gamma, theta, delz, dbatch::load_unaligned(btv), xks, xku,
                        dbatch::load_unaligned(ezv), fc);
-            gamma.store_unaligned(g_s + ip);
-            theta.store_unaligned(th_s + ip);
-        }
-        // scalar remainder
-        for (; ip < np; ip++) {
-            const double awloc = und->faw(x_s[ip], y_s[ip]);                 // get the transverse dependence of the undulator field
-            const double btpar = 1 + px_s[ip] * px_s[ip] + py_s[ip] * py_s[ip] + aw * aw * awloc * awloc;
-            // adding global long range space charge field to each particle
-            // efield.ez[ip]
-            const double ez = efield.getEField(ip) + eloss;
-            for (int ifld = 0; ifld < nf; ifld++) {
-                rpart[ifld] = sampleField(pfldv[ifld], *slcv[ifld], x_s[ip], y_s[ip], rtmp[ifld] * awloc);
-            }
-
-            double gamma = g_s[ip];
-            double theta = th_s[ip] + autophase; // add autophase here
-            RungeKutta(gamma, theta, delz, btpar, xks, xku, ez,
-                       ScalarCoupling{rharm.data(), rpart.data(), nf});
-            g_s[ip] = gamma;
-            th_s[ip] = theta;
+            gamma.store_aligned(g_s + ip);
+            theta.store_aligned(th_s + ip);
         }
     }
 }
 
-template <class T, class Coupling>
-void RungeKutta(T &gamma, T &theta, double delz, const T &btpar, double xks, double xku, const T &ez, const Coupling &cpl) {
+void RungeKutta(dbatch &gamma, dbatch &theta, double delz, const dbatch &btpar, double xks, double xku, const dbatch &ez, const BatchCoupling &cpl) {
     // Runge Kutta Solver 4th order - taken from pushp from the old Fortran source
 
     // first step
-    T k2gg(0.);
-    T k2pp(0.);
+    dbatch k2gg(0.);
+    dbatch k2pp(0.);
 
     ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez, cpl);
 
@@ -202,11 +156,11 @@ void RungeKutta(T &gamma, T &theta, double delz, const T &btpar, double xks, dou
     gamma += stpz * k2gg;
     theta += stpz * k2pp;
 
-    T k3gg = k2gg;
-    T k3pp = k2pp;
+    dbatch k3gg = k2gg;
+    dbatch k3pp = k2pp;
 
-    k2gg = T(0.);
-    k2pp = T(0.);
+    k2gg = dbatch(0.);
+    k2pp = dbatch(0.);
 
     ODE(k2gg, k2pp, xks, gamma, theta, btpar, xku, ez, cpl);
 
@@ -241,15 +195,12 @@ void RungeKutta(T &gamma, T &theta, double delz, const T &btpar, double xks, dou
 }
 
 
-template <class T, class Coupling>
-void ODE(T &k2gg, T &k2pp, double xks, const T &tgam, const T &tthet, const T &btpar, double xku, const T &ez, const Coupling &cpl) {
+void ODE(dbatch &k2gg, dbatch &k2pp, double xks, const dbatch &tgam, const dbatch &tthet, const dbatch &btpar, double xku, const dbatch &ez, const BatchCoupling &cpl) {
 
-    // differential equation for longitudinal motion
-    // T = double advances one particle, T = dbatch a batch of particles;
-    // xsimd provides the scalar overloads of sincos/sqrt
+    // differential equation for longitudinal motion; each lane advances one particle
     double ztemp1 = -2. / xks;
-    T ctmp_re(0.);
-    T ctmp_im(0.);
+    dbatch ctmp_re(0.);
+    dbatch ctmp_im(0.);
     for (int i = 0; i < cpl.nfld; i++) {
         auto angle = cpl.rharm[i] * tthet;
         // rpart * (cos - i sin)
@@ -258,12 +209,12 @@ void ODE(T &k2gg, T &k2pp, double xks, const T &tgam, const T &tthet, const T &b
         ctmp_re += re * c + im * s;
         ctmp_im += im * c - re * s;
     }
-    T btper0 = btpar + ztemp1 * ctmp_re;   //perpendicular velocity
-    T btpar0 = xsimd::sqrt(1. - btper0 / (tgam * tgam));     //parallel velocity
+    dbatch btper0 = btpar + ztemp1 * ctmp_re;   //perpendicular velocity
+    dbatch btpar0 = xsimd::sqrt(1. - btper0 / (tgam * tgam));     //parallel velocity
 #ifdef G4_DBGDIAG
     // CL: detect negative radicands as NaN theta values can be the result
-    T btpar0_sq=1.-btper0/(tgam*tgam);     //(parallel velocity)^2
-    if(anyNegative(btpar0_sq)) {
+    dbatch btpar0_sq=1.-btper0/(tgam*tgam);     //(parallel velocity)^2
+    if(xsimd::any(btpar0_sq < 0.)) {
       cout << "DBGDIAG(BeamSolver::ODE): error, negative radicand detected" << endl;
     }
 #endif

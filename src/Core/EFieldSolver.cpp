@@ -197,10 +197,13 @@ double EFieldSolver::getEField(unsigned long i)
 void EFieldSolver::shortRange(Particles *beam, double current, double gz2, int islice) {
 
     auto npart = beam->size();
-    if (npart > ez.size()){
-        ez.resize(npart);
+    // sized and zeroed through the SIMD padding so that BeamSolver's batched
+    // tail lanes read a well-defined 0
+    const auto nphys = padded_count(npart);
+    if (nphys > ez.size()){
+        ez.resize(nphys);
     }
-    for (int i =0; i < npart; i++){
+    for (int i =0; i < nphys; i++){
         ez[i] = 0;
     }
     efield[islice] = 0;
