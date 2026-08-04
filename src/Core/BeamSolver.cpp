@@ -49,14 +49,14 @@ template <class T, class Coupling>
 void ODE(T &k2gg, T &k2pp, double xks, const T &tgam, const T &tthet,
          const T &btpar, double xku, const T &ez, const Coupling &cpl);
 
-// bilinear field sample at the particle, scaled by the coupling constant;
-// zero for particles off the grid
+// bilinear field sample at the particle position, scaled by the coupling
+// constant; zero for particles off the grid
 inline complex<double> sampleField(Field *pfld, const vector<complex<double>> &slc,
-                                   const Particle &particle, double coupling)
+                                   double x, double y, double coupling)
 {
     double wx, wy;
     int idx;
-    if (!pfld->getLLGridpoint(particle.x, particle.y, &wx, &wy, &idx)) {
+    if (!pfld->getLLGridpoint(x, y, &wx, &wy, &idx)) {
         return 0;
     }
     complex<double> cp = slc[idx] * wx * wy;
@@ -115,7 +115,7 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     vector<double> rp_re(static_cast<size_t>(nf) * dbatch_width);
     vector<double> rp_im(static_cast<size_t>(nf) * dbatch_width);
     const BatchCoupling fc{rharm.data(), rp_re.data(), rp_im.data(), nf};
-    double thv[dbatch_width], gmv[dbatch_width], btv[dbatch_width], ezv[dbatch_width];
+    double btv[dbatch_width], ezv[dbatch_width];
     // per-slice field slice lookups, constant over the particles of a slice
     vector<Field *> pfldv(nf);
     vector<const vector<complex<double>> *> slcv(nf);
@@ -133,56 +133,55 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
             slcv[ifld] = &pfld->field[islice];
         }
 
+        double *g_s = beam_is.gamma();
+        double *th_s = beam_is.theta();
+        const double *x_s = beam_is.x();
+        const double *y_s = beam_is.y();
+        const double *px_s = beam_is.px();
+        const double *py_s = beam_is.py();
+
         const int np = static_cast<int>(beam_is.size());
         int ip = 0;
-        // batched path: field interpolation and write-back stay scalar per
-        // lane, the RK4 (trig/sqrt/div) runs on full batches
+        // batched path: field interpolation and undulator lookups stay scalar
+        // per lane, the RK4 (trig/sqrt/div) runs on full batches
         for (; ip + dbatch_width <= np; ip += dbatch_width) {
             for (int l = 0; l < dbatch_width; l++) {
-                auto &particle = beam_is[ip + l];
-                const double awloc = und->faw(particle.x, particle.y);                 // get the transverse dependence of the undulator field
-                btv[l] = 1 + particle.px * particle.px + particle.py * particle.py + aw * aw * awloc * awloc;
+                const double awloc = und->faw(x_s[ip + l], y_s[ip + l]);                 // get the transverse dependence of the undulator field
+                btv[l] = 1 + px_s[ip + l] * px_s[ip + l] + py_s[ip + l] * py_s[ip + l] + aw * aw * awloc * awloc;
                 // adding global long range space charge field to each particle
                 ezv[l] = efield.getEField(ip + l) + eloss;
-                thv[l] = particle.theta + autophase; // add autophase here
-                gmv[l] = particle.gamma;
 
                 for (int ifld = 0; ifld < nf; ifld++) {
-                    const complex<double> rp = sampleField(pfldv[ifld], *slcv[ifld], particle, rtmp[ifld] * awloc);
+                    const complex<double> rp = sampleField(pfldv[ifld], *slcv[ifld], x_s[ip + l], y_s[ip + l], rtmp[ifld] * awloc);
                     rp_re[ifld * dbatch_width + l] = rp.real();
                     rp_im[ifld * dbatch_width + l] = rp.imag();
                 }
             }
 
-            dbatch gamma = dbatch::load_unaligned(gmv);
-            dbatch theta = dbatch::load_unaligned(thv);
+            dbatch gamma = dbatch::load_unaligned(g_s + ip);
+            dbatch theta = dbatch::load_unaligned(th_s + ip) + autophase; // add autophase here
             RungeKutta(gamma, theta, delz, dbatch::load_unaligned(btv), xks, xku,
                        dbatch::load_unaligned(ezv), fc);
-            gamma.store_unaligned(gmv);
-            theta.store_unaligned(thv);
-            for (int l = 0; l < dbatch_width; l++) {
-                beam_is[ip + l].gamma = gmv[l];
-                beam_is[ip + l].theta = thv[l];
-            }
+            gamma.store_unaligned(g_s + ip);
+            theta.store_unaligned(th_s + ip);
         }
         // scalar remainder
         for (; ip < np; ip++) {
-            auto &particle = beam_is[ip];
-            const double awloc = und->faw(particle.x, particle.y);                 // get the transverse dependence of the undulator field
-            const double btpar = 1 + particle.px * particle.px + particle.py * particle.py + aw * aw * awloc * awloc;
+            const double awloc = und->faw(x_s[ip], y_s[ip]);                 // get the transverse dependence of the undulator field
+            const double btpar = 1 + px_s[ip] * px_s[ip] + py_s[ip] * py_s[ip] + aw * aw * awloc * awloc;
             // adding global long range space charge field to each particle
             // efield.ez[ip]
             const double ez = efield.getEField(ip) + eloss;
             for (int ifld = 0; ifld < nf; ifld++) {
-                rpart[ifld] = sampleField(pfldv[ifld], *slcv[ifld], particle, rtmp[ifld] * awloc);
+                rpart[ifld] = sampleField(pfldv[ifld], *slcv[ifld], x_s[ip], y_s[ip], rtmp[ifld] * awloc);
             }
 
-            double gamma = particle.gamma;
-            double theta = particle.theta + autophase; // add autophase here
+            double gamma = g_s[ip];
+            double theta = th_s[ip] + autophase; // add autophase here
             RungeKutta(gamma, theta, delz, btpar, xks, xku, ez,
                        ScalarCoupling{rharm.data(), rpart.data(), nf});
-            particle.gamma = gamma;
-            particle.theta = theta;
+            g_s[ip] = gamma;
+            th_s[ip] = theta;
         }
     }
 }

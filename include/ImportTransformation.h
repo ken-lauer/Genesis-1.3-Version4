@@ -21,8 +21,8 @@ public:
 
 private:
     static void usage();
-    void applyVector(vector<vector<Particle>> &beam);
-    void applyMatrix(vector<vector<Particle>> &beam);
+    void applyVector(vector<Particles> &beam);
+    void applyMatrix(vector<Particles> &beam);
 
     double lambda{0},kr{0},gamma{0},dslice{0}, slen{0};
     unsigned long nslice{0};

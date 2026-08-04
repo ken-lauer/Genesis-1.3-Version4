@@ -437,14 +437,11 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         }
         // bunching phasors, batched over particles
         {
-            double thv[dbatch_width];
+            const double *th_s = slice.theta();
             const int np = static_cast<int>(slice.size());
             int ip = 0;
             for (; ip + dbatch_width <= np; ip += dbatch_width) {
-                for (int l = 0; l < dbatch_width; l++) {
-                    thv[l] = slice[ip + l].theta;
-                }
-                const dbatch th = dbatch::load_unaligned(thv);
+                const dbatch th = dbatch::load_unaligned(th_s + ip);
                 for (int iharm = 0; iharm < nharm; iharm++) {
                     const auto [s, c] = xsimd::sincos(static_cast<double>(iharm + 1) * th);
                     b[iharm] += complex<double>(xsimd::reduce_add(c), xsimd::reduce_add(s));
@@ -767,8 +764,11 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
 
     complex<double> *in  = nullptr;
     complex<double> *out = nullptr;
-    fftw_plan p;
-    obtain_FFT_resources(ngrid, &in, &out, &p);
+    fftw_plan p = nullptr;
+    const bool do_fft = filter["fft"];
+    if (do_fft) {
+        obtain_FFT_resources(ngrid, &in, &out, &p);
+    }
 #endif
 
 
@@ -788,7 +788,9 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
                 int i = iy * ngrid + ix;
                 loc = slice.at(i);
 #ifdef FFTW
-                in[i]=loc;   // field for the FFT
+                if (do_fft) {
+                    in[i]=loc;   // field for the FFT
+                }
 #endif
                 double wei = loc.real() * loc.real() + loc.imag() * loc.imag();
                 ff += loc;

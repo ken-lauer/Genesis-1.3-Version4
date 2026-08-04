@@ -48,9 +48,13 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             };
 
             auto &particles = beam->beam.at(ii);
+            const double *x_s = particles.x();
+            const double *y_s = particles.y();
+            const double *th_s = particles.theta();
+            const double *g_s = particles.gamma();
             const int np = static_cast<int>(particles.size());
             double wxv[dbatch_width], wyv[dbatch_width];
-            double thv[dbatch_width], gmv[dbatch_width], f2v[dbatch_width];
+            double f2v[dbatch_width];
             double rev[dbatch_width], imv[dbatch_width];
             int idxv[dbatch_width];
             bool onv[dbatch_width];
@@ -60,16 +64,13 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             // scatter scalar per lane
             for (; ip + dbatch_width <= np; ip += dbatch_width) {
                 for (int l = 0; l < dbatch_width; l++) {
-                    auto &particle = particles[ip + l];
-                    onv[l] = field->getLLGridpoint(particle.x, particle.y, &wxv[l], &wyv[l], &idxv[l]);
-                    f2v[l] = onv[l] ? und->faw2(particle.x, particle.y) : 0;
-                    thv[l] = static_cast<double>(harm) * particle.theta;
-                    gmv[l] = particle.gamma;
+                    onv[l] = field->getLLGridpoint(x_s[ip + l], y_s[ip + l], &wxv[l], &wyv[l], &idxv[l]);
+                    f2v[l] = onv[l] ? und->faw2(x_s[ip + l], y_s[ip + l]) : 0;
                 }
 
-                const auto [s, c] = xsimd::sincos(dbatch::load_unaligned(thv));
+                const auto [s, c] = xsimd::sincos(static_cast<double>(harm) * dbatch::load_unaligned(th_s + ip));
                 // tmp  should be also normalized with beta parallel
-                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_unaligned(gmv);
+                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_unaligned(g_s + ip);
                 (s * part).store_unaligned(rev);
                 (c * part).store_unaligned(imv);
 
@@ -81,13 +82,12 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             }
             // scalar remainder
             for (; ip < np; ip++) {
-                auto &particle = particles[ip];
                 double wx, wy;
                 int idx;
 
-                if (field->getLLGridpoint(particle.x, particle.y, &wx, &wy, &idx)) {
-                    double theta = static_cast<double>(harm) * particle.theta;
-                    double part = sqrt(und->faw2(particle.x, particle.y)) * scl / particle.gamma;
+                if (field->getLLGridpoint(x_s[ip], y_s[ip], &wx, &wy, &idx)) {
+                    double theta = static_cast<double>(harm) * th_s[ip];
+                    double part = sqrt(und->faw2(x_s[ip], y_s[ip])) * scl / g_s[ip];
                     // tmp  should be also normalized with beta parallel
                     deposit(complex<double>(sin(theta), cos(theta)) * part, wx, wy, idx);
                 }

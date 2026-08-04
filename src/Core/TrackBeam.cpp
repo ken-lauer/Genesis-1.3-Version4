@@ -65,50 +65,38 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
   if (qy!=0){ yoff=yoff/qy; }
   const QuadMode modeX = quadMode(qx);
   const QuadMode modeY = quadMode(qy);
-  double xv[dbatch_width], pxv[dbatch_width], yv[dbatch_width], pyv[dbatch_width], gmv[dbatch_width];
 
   for (int i=0; i<beam->beam.size();i++){
     auto &slice = beam->beam.at(i);
+    double *x_s = slice.x();
+    double *px_s = slice.px();
+    double *y_s = slice.y();
+    double *py_s = slice.py();
+    const double *g_s = slice.gamma();
     const int np = static_cast<int>(slice.size());
     int j = 0;
     for (; j + dbatch_width <= np; j += dbatch_width) {
-      for (int l = 0; l < dbatch_width; l++) {
-        const Particle &p = slice[j + l];
-        xv[l] = p.x;
-        pxv[l] = p.px;
-        yv[l] = p.y;
-        pyv[l] = p.py;
-        gmv[l] = p.gamma;
-      }
-      dbatch x = dbatch::load_unaligned(xv);
-      dbatch px = dbatch::load_unaligned(pxv);
-      dbatch y = dbatch::load_unaligned(yv);
-      dbatch py = dbatch::load_unaligned(pyv);
-      const dbatch g = dbatch::load_unaligned(gmv);
+      dbatch x = dbatch::load_unaligned(x_s + j);
+      dbatch px = dbatch::load_unaligned(px_s + j);
+      dbatch y = dbatch::load_unaligned(y_s + j);
+      dbatch py = dbatch::load_unaligned(py_s + j);
+      const dbatch g = dbatch::load_unaligned(g_s + j);
       const dbatch gammaz = xsimd::sqrt(g * g - 1. - aw * aw - px * px - py * py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
       applyQuad(modeX, delz, qx, x, px, gammaz, xoff);
       applyQuad(modeY, delz, qy, y, py, gammaz, yoff);
-      x.store_unaligned(xv);
-      px.store_unaligned(pxv);
-      y.store_unaligned(yv);
-      py.store_unaligned(pyv);
-      for (int l = 0; l < dbatch_width; l++) {
-        Particle &p = slice[j + l];
-        p.x = xv[l];
-        p.px = pxv[l];
-        p.y = yv[l];
-        p.py = pyv[l];
-      }
+      x.store_unaligned(x_s + j);
+      px.store_unaligned(px_s + j);
+      y.store_unaligned(y_s + j);
+      py.store_unaligned(py_s + j);
     }
     // scalar remainder
     for (; j < np; j++) {
-      Particle &p=slice[j];
-      double gammaz=sqrt(p.gamma*p.gamma-1- aw*aw - p.px*p.px - p.py*p.py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
+      double gammaz=sqrt(g_s[j]*g_s[j]-1- aw*aw - px_s[j]*px_s[j] - py_s[j]*py_s[j]); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
 #ifdef G4_DBGDIAG
 // G4_DBGDIAG: add test against negative radicand? Note that the particles probably already made lots of noise elsewhere.
 #endif
-      applyQuad(modeX,delz,qx,p.x,p.px,gammaz,xoff);
-      applyQuad(modeY,delz,qy,p.y,p.py,gammaz,yoff);
+      applyQuad(modeX,delz,qx,x_s[j],px_s[j],gammaz,xoff);
+      applyQuad(modeY,delz,qy,y_s[j],py_s[j],gammaz,yoff);
     }
   }
 
@@ -255,16 +243,16 @@ void TrackBeam::applyChicane(Beam *beam, double angle, double lb, double ld, dou
 
   for (int i=0; i<beam->beam.size();i++){
     for (int j=0; j<beam->beam.at(i).size();j++){
-      Particle *p=&beam->beam.at(i).at(j);
-      double gammaz=sqrt(p->gamma*p->gamma-1- p->px*p->px - p->py*p->py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
+      auto p=beam->beam.at(i)[j];
+      double gammaz=sqrt(p.gamma*p.gamma-1- p.px*p.px - p.py*p.py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
 
-      double tmp=p->x;
-      p->x =m[0][0]*tmp        +m[0][1]*p->px/gammaz;
-      p->px=m[1][0]*tmp*gammaz +m[1][1]*p->px;
-      tmp=p->y;
-      p->y =m[2][2]*tmp        +m[2][3]*p->py/gammaz;
-      p->py=m[3][2]*tmp*gammaz +m[3][3]*p->py;
-      
+      double tmp=p.x;
+      p.x =m[0][0]*tmp        +m[0][1]*p.px/gammaz;
+      p.px=m[1][0]*tmp*gammaz +m[1][1]*p.px;
+      tmp=p.y;
+      p.y =m[2][2]*tmp        +m[2][3]*p.py/gammaz;
+      p.py=m[3][2]*tmp*gammaz +m[3][3]*p.py;
+
     }
   }
 

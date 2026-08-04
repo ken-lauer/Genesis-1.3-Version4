@@ -112,6 +112,9 @@ void DiagBeamHook::getValues_worker(Beam *beam, std::map<std::string,std::vector
 	int is = 0;
 	
 	for (auto const &slice: beam->beam) {
+		// the plugin ABI expects AoS particle data (frozen struct layout);
+		// materialize a copy of the SoA slice for the call
+		const std::vector<Particle> slice_copy(slice.begin(), slice.end());
 		vector<double> dataout(li_.obj_names_.size(),-1.);
 
 		DiagBeamHookData hd;
@@ -123,7 +126,7 @@ void DiagBeamHook::getValues_worker(Beam *beam, std::map<std::string,std::vector
 		hd.iz = iz;
 		hd.is = is;
 		hd.ns = ns;
-		hd.datain = &slice;
+		hd.datain = &slice_copy;
 		hd.dataout = &dataout;
 		hd.do_multi = false;
 

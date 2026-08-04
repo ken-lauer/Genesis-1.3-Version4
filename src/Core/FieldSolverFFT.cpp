@@ -24,7 +24,7 @@ void FieldSolverFFT::advance(double delz, Field *field, Beam *beam, Undulator *u
             double part, weight, wx, wy;
             int idx;
 
-            for (auto & particle : beam->beam.at(ii)) {
+            for (auto const & particle : beam->beam.at(ii)) {
                 double x = particle.x;
                 double y = particle.y;
                 double theta = static_cast<double>(harm) * particle.theta;

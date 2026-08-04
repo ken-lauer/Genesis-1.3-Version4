@@ -24,7 +24,7 @@ public:
     EFieldSolver();
     virtual ~EFieldSolver();
     void init(double, int, int, int, double, bool);
-    void shortRange(vector<Particle> *, double, double, int);
+    void shortRange(Particles *, double, double, int);
     void longRange(Beam *beam, double gamma, double aw);
     double getEField(unsigned long i);
     bool hasShortRange() const;
@@ -32,7 +32,7 @@ public:
     double getSCField(int);
 
 private:
-    void analyseBeam(vector<Particle> *beam);
+    void analyseBeam(Particles *beam);
     void constructLaplaceOperator();
     void tridiag();
 
