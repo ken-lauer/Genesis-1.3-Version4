@@ -13,6 +13,55 @@ inline cbatch stencil(const cbatch &s, const cbatch &f, const cbatch &neigh, con
     return s + f + vstep * (neigh - f - f);
 }
 
+// Full forward/backward tridiagonal recurrence for B row-blocks
+// (B * cbatch_width rows) starting at `row`. The recurrence runs along the
+// contiguous (x) dimension, so lanes are filled with cbatch_width independent
+// rows instead; the recurrence values stay in registers across k. B > 1
+// advances several row-blocks together so their serial mul-add chains overlap
+// (single-chain throughput is latency-bound).
+template <int B>
+void tridagxRows(complex<double> *up, const complex<double> *rp,
+                 const vector<complex<double>> &c, const vector<complex<double>> &cbet,
+                 const vector<complex<double>> &cwet, int n, int row)
+{
+    alignas(64) complex<double> lane[cbatch_width];
+    auto gather = [&](const complex<double> *p, int base, int k) {
+        for (int l = 0; l < cbatch_width; l++) {
+            lane[l] = p[base + l * n + k];
+        }
+        return cbatch::load_aligned(lane);
+    };
+    auto scatter = [&](const cbatch &b, int base, int k) {
+        b.store_aligned(lane);
+        for (int l = 0; l < cbatch_width; l++) {
+            up[base + l * n + k] = lane[l];
+        }
+    };
+
+    int base[B];
+    cbatch uk[B];
+    for (int b = 0; b < B; b++) {
+        base[b] = (row + b * cbatch_width) * n;
+        uk[b] = gather(rp, base[b], 0) * cbatch(cbet[0]);
+        scatter(uk[b], base[b], 0);
+    }
+    for (int k = 1; k < n; k++) {
+        const cbatch ck(c[k]);
+        const cbatch bk(cbet[k]);
+        for (int b = 0; b < B; b++) {
+            uk[b] = (gather(rp, base[b], k) - ck * uk[b]) * bk;
+            scatter(uk[b], base[b], k);
+        }
+    }
+    for (int k = n - 2; k >= 0; k--) {
+        const cbatch wk(cwet[k + 1]);
+        for (int b = 0; b < B; b++) {
+            uk[b] = gather(up, base[b], k) - wk * uk[b];
+            scatter(uk[b], base[b], k);
+        }
+    }
+}
+
 } // namespace
 
 
@@ -47,8 +96,8 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             const double *g_s = particles.gamma();
             const int np = static_cast<int>(particles.size());
             double wxv[dbatch_width], wyv[dbatch_width];
-            double f2v[dbatch_width];
-            double rev[dbatch_width], imv[dbatch_width];
+            alignas(64) double f2v[dbatch_width];
+            alignas(64) double rev[dbatch_width], imv[dbatch_width];
             int idxv[dbatch_width];
             bool onv[dbatch_width];
 
@@ -64,9 +113,9 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
 
                 const auto [s, c] = xsimd::sincos(static_cast<double>(harm) * dbatch::load_aligned(th_s + ip));
                 // tmp  should be also normalized with beta parallel
-                const dbatch part = xsimd::sqrt(dbatch::load_unaligned(f2v)) * scl / dbatch::load_aligned(g_s + ip);
-                (s * part).store_unaligned(rev);
-                (c * part).store_unaligned(imv);
+                const dbatch part = xsimd::sqrt(dbatch::load_aligned(f2v)) * scl / dbatch::load_aligned(g_s + ip);
+                (s * part).store_aligned(rev);
+                (c * part).store_aligned(imv);
 
                 const int lanes = std::min(dbatch_width, np - ip);
                 for (int l = 0; l < lanes; l++) {
@@ -149,66 +198,20 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 }
 
 
-// The recurrence runs along the contiguous (x) dimension, so lanes are filled
-// with cbatch_width independent rows instead; the recurrence value stays in
-// registers across k. Two row-blocks advance together so their serial
-// mul-add chains overlap (single-chain throughput is latency-bound).
 void FieldSolverADI::tridagx(vector<complex<double > > &u) {
     const int n = static_cast<int>(ngrid);
     complex<double> *up = u.data();
     const complex<double> *rp = r.data();
-    complex<double> lane[cbatch_width];
-
-    auto gather = [&](const complex<double> *p, int base, int k) {
-        for (int l = 0; l < cbatch_width; l++) {
-            lane[l] = p[base + l * n + k];
-        }
-        return cbatch::load_unaligned(lane);
-    };
-    auto scatter = [&](const cbatch &b, int base, int k) {
-        b.store_unaligned(lane);
-        for (int l = 0; l < cbatch_width; l++) {
-            up[base + l * n + k] = lane[l];
-        }
-    };
 
     int row = 0;
     for (; row + 2 * cbatch_width <= n; row += 2 * cbatch_width) {
-        const int b0 = row * n;
-        const int b1 = (row + cbatch_width) * n;
-        cbatch uk0 = gather(rp, b0, 0) * cbatch(cbet[0]);
-        cbatch uk1 = gather(rp, b1, 0) * cbatch(cbet[0]);
-        scatter(uk0, b0, 0);
-        scatter(uk1, b1, 0);
-        for (int k = 1; k < n; k++) {
-            const cbatch ck(c[k]);
-            const cbatch bk(cbet[k]);
-            uk0 = (gather(rp, b0, k) - ck * uk0) * bk;
-            uk1 = (gather(rp, b1, k) - ck * uk1) * bk;
-            scatter(uk0, b0, k);
-            scatter(uk1, b1, k);
-        }
-        for (int k = n - 2; k >= 0; k--) {
-            const cbatch wk(cwet[k + 1]);
-            uk0 = gather(up, b0, k) - wk * uk0;
-            uk1 = gather(up, b1, k) - wk * uk1;
-            scatter(uk0, b0, k);
-            scatter(uk1, b1, k);
-        }
+        tridagxRows<2>(up, rp, c, cbet, cwet, n, row);
     }
     for (; row + cbatch_width <= n; row += cbatch_width) {
-        const int base = row * n;
-        cbatch uk = gather(rp, base, 0) * cbatch(cbet[0]);
-        scatter(uk, base, 0);
-        for (int k = 1; k < n; k++) {
-            uk = (gather(rp, base, k) - cbatch(c[k]) * uk) * cbatch(cbet[k]);
-            scatter(uk, base, k);
-        }
-        for (int k = n - 2; k >= 0; k--) {
-            uk = gather(up, base, k) - cbatch(cwet[k + 1]) * uk;
-            scatter(uk, base, k);
-        }
+        tridagxRows<1>(up, rp, c, cbet, cwet, n, row);
     }
+    // scalar tail: fewer rows than one batch. The backward sweep updates u in
+    // place, so re-running an overlapping block would be wrong - this stays.
     for (; row < n; row++) {
         const int i = row * n;
         up[i] = rp[i] * cbet[0];

@@ -11,10 +11,11 @@ struct BatchCoupling {
     const double *im;
     int nfld;
 
+    // the staging arrays are 64-byte aligned and indexed in whole batches
     std::pair<dbatch, dbatch> rpart(int i) const
     {
-        return {dbatch::load_unaligned(re + i * dbatch_width),
-                dbatch::load_unaligned(im + i * dbatch_width)};
+        return {dbatch::load_aligned(re + i * dbatch_width),
+                dbatch::load_aligned(im + i * dbatch_width)};
     }
 };
 
@@ -85,10 +86,11 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     // Runge Kutta solver to advance particle
     const auto gammaz2 = und->getGammaRef()*und->getGammaRef()/(1+aw*aw);
     const int nf = static_cast<int>(nfld.size());
-    vector<double> rp_re(static_cast<size_t>(nf) * dbatch_width);
-    vector<double> rp_im(static_cast<size_t>(nf) * dbatch_width);
+    using avec = vector<double, xsimd::aligned_allocator<double, 64>>;
+    avec rp_re(static_cast<size_t>(nf) * dbatch_width);
+    avec rp_im(static_cast<size_t>(nf) * dbatch_width);
     const BatchCoupling fc{rharm.data(), rp_re.data(), rp_im.data(), nf};
-    double btv[dbatch_width], ezv[dbatch_width];
+    alignas(64) double btv[dbatch_width], ezv[dbatch_width];
     // per-slice field slice lookups, constant over the particles of a slice
     vector<Field *> pfldv(nf);
     vector<const vector<complex<double>> *> slcv(nf);
@@ -133,8 +135,8 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
 
             dbatch gamma = dbatch::load_aligned(g_s + ip);
             dbatch theta = dbatch::load_aligned(th_s + ip) + autophase; // add autophase here
-            RungeKutta(gamma, theta, delz, dbatch::load_unaligned(btv), xks, xku,
-                       dbatch::load_unaligned(ezv), fc);
+            RungeKutta(gamma, theta, delz, dbatch::load_aligned(btv), xks, xku,
+                       dbatch::load_aligned(ezv), fc);
             gamma.store_aligned(g_s + ip);
             theta.store_aligned(th_s + ip);
         }
