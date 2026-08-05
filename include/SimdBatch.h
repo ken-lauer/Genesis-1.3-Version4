@@ -37,6 +37,26 @@ inline xsimd::batch_bool<double> tail_mask(std::size_t count)
     return dbatch::load_aligned(iota) < dbatch(static_cast<double>(count));
 }
 
+// Batched Field::getLLGridpoint: bilinear weights and lower-left grid index
+// of each lane's cell, plus the on-grid mask. wx/wy/idx of off-grid lanes are
+// garbage and must be skipped via the mask. idx is integer-valued but kept in
+// doubles (exact well below 2^53); lane consumers cast per lane. The division
+// by dgrid matches the scalar code bit for bit.
+inline xsimd::batch_bool<double> grid_weights(const dbatch &x, const dbatch &y,
+                                              double gridmax, double dgrid, double ngrid,
+                                              dbatch &wx, dbatch &wy, dbatch &idx)
+{
+    const auto on = (x > -gridmax) && (x < gridmax) && (y > -gridmax) && (y < gridmax);
+    const dbatch tx = (x + gridmax) / dgrid;
+    const dbatch ty = (y + gridmax) / dgrid;
+    const dbatch fx = xsimd::floor(tx);
+    const dbatch fy = xsimd::floor(ty);
+    wx = 1. + fx - tx;
+    wy = 1. + fy - ty;
+    idx = fx + fy * ngrid;
+    return on;
+}
+
 // Reduction over the first np entries of padded particle arrays: body(ip)
 // returns N batches of per-lane contributions, batch_sum returns their N
 // horizontal sums. Whole batches accumulate unmasked (padding makes the loads

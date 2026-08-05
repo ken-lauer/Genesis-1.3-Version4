@@ -95,32 +95,38 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
             const double *th_s = particles.theta();
             const double *g_s = particles.gamma();
             const int np = static_cast<int>(particles.size());
-            double wxv[dbatch_width], wyv[dbatch_width];
-            alignas(64) double f2v[dbatch_width];
+            const UndTransverse utp = und->transverseParams();
+            alignas(64) double wxv[dbatch_width], wyv[dbatch_width], idxv[dbatch_width];
             alignas(64) double rev[dbatch_width], imv[dbatch_width];
-            int idxv[dbatch_width];
-            bool onv[dbatch_width];
 
-            // whole batches over the padded arrays: sincos/sqrt/div on full
-            // batches, grid lookup and scatter scalar per lane. The scatter is
-            // a side effect, so tail lanes (replicas of the last particle)
-            // must not deposit.
+            // whole batches over the padded arrays: everything batched except
+            // the scatter onto the grid, which stays scalar per lane. The
+            // scatter is a side effect, so off-grid lanes and tail lanes
+            // (replicas of the last particle) must not deposit.
             for (int ip = 0; ip < np; ip += dbatch_width) {
-                for (int l = 0; l < dbatch_width; l++) {
-                    onv[l] = field->getLLGridpoint(x_s[ip + l], y_s[ip + l], &wxv[l], &wyv[l], &idxv[l]);
-                    f2v[l] = onv[l] ? und->faw2(x_s[ip + l], y_s[ip + l]) : 0;
-                }
+                const dbatch x = dbatch::load_aligned(x_s + ip);
+                const dbatch y = dbatch::load_aligned(y_s + ip);
+                dbatch wx, wy, idx;
+                const auto on = grid_weights(x, y, field->gridmax, field->dgrid,
+                                             static_cast<double>(ngrid), wx, wy, idx);
+                // off-grid lanes get 0 so the sqrt below stays NaN-free
+                const dbatch f2 = xsimd::select(on, utp.faw2(x, y), dbatch(0.));
 
                 const auto [s, c] = xsimd::sincos(static_cast<double>(harm) * dbatch::load_aligned(th_s + ip));
                 // tmp  should be also normalized with beta parallel
-                const dbatch part = xsimd::sqrt(dbatch::load_aligned(f2v)) * scl / dbatch::load_aligned(g_s + ip);
+                const dbatch part = xsimd::sqrt(f2) * scl / dbatch::load_aligned(g_s + ip);
                 (s * part).store_aligned(rev);
                 (c * part).store_aligned(imv);
+                wx.store_aligned(wxv);
+                wy.store_aligned(wyv);
+                idx.store_aligned(idxv);
 
+                const uint64_t onm = on.mask();
                 const int lanes = std::min(dbatch_width, np - ip);
                 for (int l = 0; l < lanes; l++) {
-                    if (onv[l]) {
-                        deposit(complex<double>(rev[l], imv[l]), wxv[l], wyv[l], idxv[l]);
+                    if (onm & (1ull << l)) {
+                        deposit(complex<double>(rev[l], imv[l]), wxv[l], wyv[l],
+                                static_cast<int>(idxv[l]));
                     }
                 }
             }
