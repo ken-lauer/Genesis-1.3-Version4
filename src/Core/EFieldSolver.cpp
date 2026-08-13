@@ -119,7 +119,7 @@ void EFieldSolver::longRange(Beam *beam, double gamma0, double aw) {
 
 
 
-void EFieldSolver::analyseBeam(vector<Particle> *beam){
+void EFieldSolver::analyseBeam(Particles *beam){
 /*
  *  calculates the center of the beam slice and its extension (5 times rms radius to construct the space charge grid
  */
@@ -194,13 +194,16 @@ double EFieldSolver::getEField(unsigned long i)
     return ez[i];
 }
 
-void EFieldSolver::shortRange(vector<Particle> *beam, double current, double gz2, int islice) {
+void EFieldSolver::shortRange(Particles *beam, double current, double gz2, int islice) {
 
     auto npart = beam->size();
-    if (npart > ez.size()){
-        ez.resize(npart);
+    // sized and zeroed through the SIMD padding so that BeamSolver's batched
+    // tail lanes read a well-defined 0
+    const auto nphys = padded_count(npart);
+    if (nphys > ez.size()){
+        ez.resize(nphys);
     }
-    for (int i =0; i < npart; i++){
+    for (int i =0; i < nphys; i++){
         ez[i] = 0;
     }
     efield[islice] = 0;

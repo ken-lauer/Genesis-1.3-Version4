@@ -32,20 +32,9 @@ public:
     void checkAllocation(unsigned long i);
 
 private:
-    complex<double> cpart;
     vector<double> rharm;
-    vector<complex<double> > rpart;
-
-    double ez{};
-    double xks{}, xku{};
-
-    double theta{}, gamma{}, btpar{};
-    double k2gg{}, k2pp{}, k3gg{}, k3pp{};
 
     bool onlyFundamental;
-
-    void RungeKutta(double);
-    void ODE(double, double);
 
     EFieldSolver efield;
     TrackBeam tracker;

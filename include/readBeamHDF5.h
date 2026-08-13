@@ -23,7 +23,7 @@ class ReadBeamHDF5 : public HDF5Base {
   ReadBeamHDF5();
   virtual ~ReadBeamHDF5();
   bool readGlobal(int, int, string, Setup *,Time *, bool);
-  bool readSlice(double, vector<Particle> *, double *,bool);
+  bool readSlice(double, Particles *, double *,bool);
   void close();
   
  private:

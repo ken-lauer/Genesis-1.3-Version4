@@ -1,7 +1,67 @@
 #include "FieldSolverADI.h"
 #include "Field.h"
 #include "Beam.h"
+#include "SimdBatch.h"
 
+namespace {
+
+// Contiguous complex spans: one Eigen expression per grid region replaces the
+// hand-written batch loop + scalar remainder pairs (Eigen vectorizes the body
+// and handles the tail itself).
+using cspan = Eigen::Map<Eigen::ArrayXcd>;
+using ccspan = Eigen::Map<const Eigen::ArrayXcd>;
+
+// Full forward/backward tridiagonal recurrence for B row-blocks
+// (B * cbatch_width rows) starting at `row`. The recurrence runs along the
+// contiguous (x) dimension, so lanes hold cbatch_width independent rows
+// instead; the recurrence values stay in registers across k. B > 1 advances
+// several row-blocks together so their serial mul-add chains overlap
+// (single-chain throughput is latency-bound).
+//
+// The gather/scatter bounce through the aligned lane buffer is deliberate: a
+// strided Eigen Map has no packet access, which would drop every complex
+// multiply onto the (much slower) scalar std::complex path.
+template <int B>
+void tridagxRows(complex<double> *up, const complex<double> *rp,
+                 const vector<complex<double>> &c, const vector<complex<double>> &cbet,
+                 const vector<complex<double>> &cwet, int n, int row)
+{
+    alignas(64) complex<double> lane[cbatch_width];
+    auto gather = [&](const complex<double> *p, int base, int k) -> cbatch {
+        for (int l = 0; l < cbatch_width; l++) {
+            lane[l] = p[base + l * n + k];
+        }
+        return cbatch::MapAligned(lane);
+    };
+    auto scatter = [&](const cbatch &b, int base, int k) {
+        cbatch::MapAligned(lane) = b;
+        for (int l = 0; l < cbatch_width; l++) {
+            up[base + l * n + k] = lane[l];
+        }
+    };
+
+    int base[B];
+    cbatch uk[B];
+    for (int b = 0; b < B; b++) {
+        base[b] = (row + b * cbatch_width) * n;
+        uk[b] = gather(rp, base[b], 0) * cbet[0];
+        scatter(uk[b], base[b], 0);
+    }
+    for (int k = 1; k < n; k++) {
+        for (int b = 0; b < B; b++) {
+            uk[b] = (gather(rp, base[b], k) - c[k] * uk[b]) * cbet[k];
+            scatter(uk[b], base[b], k);
+        }
+    }
+    for (int k = n - 2; k >= 0; k--) {
+        for (int b = 0; b < B; b++) {
+            uk[b] = gather(up, base[b], k) - cwet[k + 1] * uk[b];
+            scatter(uk[b], base[b], k);
+        }
+    }
+}
+
+} // namespace
 
 
 FieldSolverADI::~FieldSolverADI() = default;
@@ -10,46 +70,7 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
 
     for (unsigned long ii = 0; ii < field->field.size(); ii++) {  // ii is index for the beam
 
-        // clear source term
-        for (int ig = 0; ig < ngrid * ngrid; ig++) {
-            crsource[ig] = 0;
-        }
-
-        // constructing source term
-        int harm = field->getHarm();
-        if (und->inUndulator() && field->isEnabled() && (harm % 2 == 1)) { // do not need to calculate for even harmonics
-            double scl = und->fc(harm) * vacimp * beam->current[ii] * field->xks * delz;
-            scl /= 4 * eev * static_cast<double>(beam->beam[ii].size()) * field->dgrid * field->dgrid;
-            complex<double> cpart;
-            double part, weight, wx, wy;
-            int idx;
-
-            for (auto & particle : beam->beam.at(ii)) {
-                double x = particle.x;
-                double y = particle.y;
-                double theta = static_cast<double>(harm) * particle.theta;
-                double gamma = particle.gamma;
-
-                if (field->getLLGridpoint(x, y, &wx, &wy, &idx)) {
-
-                    part = sqrt(und->faw2(x, y)) * scl / gamma;
-                    // tmp  should be also normalized with beta parallel
-                    cpart = complex<double>(sin(theta), cos(theta)) * part;
-
-                    weight = wx * wy;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * wy;
-                    idx++;
-                    crsource[idx] += weight * cpart;
-                    weight = wx * (1 - wy);
-                    idx += ngrid - 1;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * (1 - wy);
-                    idx++;
-                    crsource[idx] += weight * cpart;
-                }
-            }
-        }  // end of source term construction
+        field->constructSource(crsource, beam, und, delz, ii);
 
         unsigned long i = (ii + field->first) % field->field.size();           // index for the field
         this->ADI(field->field[i]);
@@ -59,30 +80,40 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
 
 void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 {
-  int ix,idx;
-  // implicit direction in x
-  for (idx=0;idx<ngrid;idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]);
-  }
-  for (idx=ngrid;idx<ngrid*(ngrid-1);idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]+crfield[idx-ngrid]);
-  }
-  for (idx=ngrid*(ngrid-1);idx<ngrid*ngrid;idx++){
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-ngrid]-2.0*crfield[idx]);
-  }
+  const int n = static_cast<int>(ngrid);
+  const complex<double> *fld = crfield.data();
+  const complex<double> *src = crsource.data();
+  complex<double> *rp = r.data();
+
+  // r = source + field + cstep*(neighbors - field - field); boundary
+  // rows/columns see only their single existing neighbor. The doubled field
+  // term is spelled -F-F rather than -2.0*F: a double*complex node has no
+  // Eigen packet support ("TODO vectorize mixed product") and would drop the
+  // whole expression onto the scalar std::complex path.
+  auto F = [&](int off, int len) { return ccspan(fld + off, len); };
+  auto S = [&](int off, int len) { return ccspan(src + off, len); };
+
+  // implicit direction in x: neighbors live at +-ngrid, so the first row, the
+  // contiguous interior and the last row are one span each
+  const int mid = n * (n - 2);
+  const int lastrow = n * (n - 1);
+  cspan(rp, n) = S(0, n) + F(0, n) + cstep * (F(n, n) - F(0, n) - F(0, n));
+  cspan(rp + n, mid) = S(n, mid) + F(n, mid) +
+                       cstep * (F(2 * n, mid) + F(0, mid) - F(n, mid) - F(n, mid));
+  cspan(rp + lastrow, n) = S(lastrow, n) + F(lastrow, n) +
+                           cstep * (F(lastrow - n, n) - F(lastrow, n) - F(lastrow, n));
 
   // solve tridiagonal system in x
   this->tridagx(crfield);
 
-  // implicit direction in y
-  for(ix=0;ix<ngrid*ngrid;ix+=ngrid){
-    idx=ix;
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]);
-    for(idx=ix+1;idx<ix+ngrid-1;idx++){
-      r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]+crfield[idx-1]);
-    }
-    idx=ix+ngrid-1;
-    r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-1]-2.0*crfield[idx]);
+  // implicit direction in y: neighbors live at +-1 within each contiguous row
+  for (int ix = 0; ix < n * n; ix += n) {
+    rp[ix] = src[ix] + fld[ix] + cstep * (fld[ix + 1] - 2.0 * fld[ix]);
+    cspan(rp + ix + 1, n - 2) =
+        S(ix + 1, n - 2) + F(ix + 1, n - 2) +
+        cstep * (F(ix + 2, n - 2) + F(ix, n - 2) - F(ix + 1, n - 2) - F(ix + 1, n - 2));
+    const int last = ix + n - 1;
+    rp[last] = src[last] + fld[last] + cstep * (fld[last - 1] - 2.0 * fld[last]);
   }
 
   // solve tridiagonal system in y
@@ -92,32 +123,46 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 
 
 void FieldSolverADI::tridagx(vector<complex<double > > &u) {
-    for (int i = 0; i < ngrid * ngrid; i += ngrid) {
-        u[i] = r[i] * cbet[0];
-        for (int k = 1; k < ngrid; k++) {
-            u[k + i] = (r[k + i] - c[k] * u[k + i - 1]) * cbet[k];
+    const int n = static_cast<int>(ngrid);
+    complex<double> *up = u.data();
+    const complex<double> *rp = r.data();
+
+    int row = 0;
+    for (; row + 2 * cbatch_width <= n; row += 2 * cbatch_width) {
+        tridagxRows<2>(up, rp, c, cbet, cwet, n, row);
+    }
+    for (; row + cbatch_width <= n; row += cbatch_width) {
+        tridagxRows<1>(up, rp, c, cbet, cwet, n, row);
+    }
+    // scalar tail: fewer rows than one batch. The backward sweep updates u in
+    // place, so re-running an overlapping block would be wrong - this stays.
+    for (; row < n; row++) {
+        const int i = row * n;
+        up[i] = rp[i] * cbet[0];
+        for (int k = 1; k < n; k++) {
+            up[k + i] = (rp[k + i] - c[k] * up[k + i - 1]) * cbet[k];
         }
-        for (int k = ngrid - 2; k >= 0; k--) {
-            u[k + i] -= cwet[k + 1] * u[k + i + 1];
+        for (int k = n - 2; k >= 0; k--) {
+            up[k + i] -= cwet[k + 1] * up[k + i + 1];
         }
     }
 }
 
+// The recurrences run across rows (k), so each whole-row sweep is an
+// independent cwise expression.
 void FieldSolverADI::tridagy(vector<complex<double > > &u) {
-    for (int i = 0; i < ngrid; i++) {
-        u[i] = r[i] * cbet[0];
+    const int n = static_cast<int>(ngrid);
+    complex<double> *up = u.data();
+    const complex<double> *rp = r.data();
+
+    cspan(up, n) = ccspan(rp, n) * cbet[0];
+    for (int k = 1; k < n; k++) {
+        const int off = k * n;
+        cspan(up + off, n) = (ccspan(rp + off, n) - c[k] * ccspan(up + off - n, n)) * cbet[k];
     }
-    for (int k = 1; k < ngrid; k++) {
-        int n = k * ngrid;
-        for (int i = 0; i < ngrid; i++) {
-            u[n + i] = (r[n + i] - c[k] * u[n + i - ngrid]) * cbet[k];
-        }
-    }
-    for (int k = ngrid - 2; k >= 0; k--) {
-        int n = k * ngrid;
-        for (int i = 0; i < ngrid; i++) {
-            u[n + i] -= cwet[k + 1] * u[n + i + ngrid];
-        }
+    for (int k = n - 2; k >= 0; k--) {
+        const int off = k * n;
+        cspan(up + off, n) -= cwet[k + 1] * ccspan(up + off + n, n);
     }
 }
 

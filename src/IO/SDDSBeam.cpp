@@ -341,7 +341,7 @@ bool SDDSBeam::init(int inrank, int insize, map<string,string> *arg, Beam *beam,
 
   double dslen=ds*ttotal;  // ds is the relative width to extract the samples (equivalent to 1/NDCUT)
 
-  vector<vector<Particle> > dist;
+  vector<Particles> dist;
   dist.resize(1);
   dist[0].clear();
 
@@ -466,7 +466,7 @@ bool SDDSBeam::init(int inrank, int insize, map<string,string> *arg, Beam *beam,
 }
 
 
-void SDDSBeam::addParticles(vector<Particle> *beam, int mpart){
+void SDDSBeam::addParticles(Particles *beam, int mpart){
    
 
   // check for error if there are only one or none particle to fill up distribution 
@@ -601,7 +601,7 @@ double  SDDSBeam::distance(Particle p1, Particle p2){
 }
 
 
-void SDDSBeam::removeParticles(vector<Particle> *beam,int mpart)
+void SDDSBeam::removeParticles(Particles *beam,int mpart)
 {
   int ndist=beam->size();
   while(ndist>mpart){

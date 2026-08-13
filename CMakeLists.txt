@@ -74,6 +74,25 @@ else()
 endif()
 
 
+# Eigen (header-only) for the vectorized solvers, tracker and diagnostics
+find_package(Eigen3 CONFIG QUIET)
+if (TARGET Eigen3::Eigen)
+    message(STATUS "Eigen3 found (config): ${Eigen3_DIR}")
+    link_libraries(Eigen3::Eigen)
+else()
+    find_path(EIGEN3_INCLUDE_DIR Eigen/Core
+              HINTS $ENV{CONDA_PREFIX}/include
+              PATH_SUFFIXES eigen3)
+    if (EIGEN3_INCLUDE_DIR)
+        message(STATUS "Eigen3 found: ${EIGEN3_INCLUDE_DIR}")
+        include_directories(${EIGEN3_INCLUDE_DIR})
+    else()
+        message(FATAL_ERROR "Eigen3 headers not found (tried find_package and CONDA_PREFIX/include/eigen3); install eigen in the build env or pass -DCMAKE_PREFIX_PATH")
+    endif()
+endif()
+# Eigen runtime asserts off outside Debug builds
+add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:EIGEN_NO_DEBUG>)
+
 if(USE_DPI)
    set(SRC_DPI src/Main/RegPlugin.cpp src/Core/DiagnosticHook.cpp src/Core/DiagnosticHookBeam.cpp src/Core/DiagnosticHookLI.cpp)
 endif()

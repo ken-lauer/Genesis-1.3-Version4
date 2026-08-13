@@ -34,8 +34,8 @@ class SDDSBeam: public StringProcessing, HDF5Base{
    bool init(int,int,map<string,string> *, Beam *, Setup *, Time *, Lattice *);
  private:
    void usage();
-   void removeParticles(vector< Particle > *, int);
-   void addParticles(vector< Particle > *, int);
+   void removeParticles(Particles *, int);
+   void addParticles(Particles *, int);
    void analyse(double,int);
    void initRandomSeq(int);
    double distance(Particle, Particle);

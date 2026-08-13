@@ -95,7 +95,7 @@ bool ReadBeamHDF5::readGlobal(int rank, int size,string file, Setup *setup, Time
 
 
 
-bool ReadBeamHDF5::readSlice(double s, vector<Particle> *slice, double *current, bool one4one){
+bool ReadBeamHDF5::readSlice(double s, Particles *slice, double *current, bool one4one){
 
   
   slice->resize(0);

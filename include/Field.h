@@ -18,6 +18,7 @@ class Beam;
 
 #include "Undulator.h"
 #include "FieldSolver.h"
+#include "SimdBatch.h"
 
 using namespace std;
 
@@ -40,6 +41,17 @@ class Field{
    bool subharmonicConversion(int, bool);
    void track(double, Beam *, Undulator *);
    bool getLLGridpoint(double, double, double *, double *,int *);
+   // batched getLLGridpoint: bilinear weights and lower-left grid index of
+   // each lane's cell, plus the on-grid mask. wx/wy/idx of off-grid lanes are
+   // garbage and must be skipped via the mask. idx is integer-valued but kept
+   // in doubles (exact well below 2^53); lane consumers cast per lane. The
+   // arithmetic matches the scalar version bit for bit.
+   dmask getLLGridpointBatch(const dbatch &x, const dbatch &y,
+                             dbatch &wx, dbatch &wy, dbatch &idx) const;
+   // source term of one beam slice, accumulated onto the crsource grid owned
+   // by the calling field solver
+   void constructSource(vector<complex<double>> &crsource, Beam *beam,
+                        Undulator *und, double delz, unsigned long islice);
    void setStepsize(double);
    void disable(double);
    bool isEnabled();
@@ -129,6 +141,20 @@ inline double Field::getRHarm()
 inline int Field::getHarm()
 {
   return harm;
+}
+
+inline dmask Field::getLLGridpointBatch(const dbatch &x, const dbatch &y,
+                                        dbatch &wx, dbatch &wy, dbatch &idx) const
+{
+  const dmask on = (x > -gridmax) && (x < gridmax) && (y > -gridmax) && (y < gridmax);
+  const dbatch tx = (x + gridmax) / dgrid;
+  const dbatch ty = (y + gridmax) / dgrid;
+  const dbatch fx = tx.floor();
+  const dbatch fy = ty.floor();
+  wx = 1. + fx - tx;
+  wy = 1. + fy - ty;
+  idx = fx + fy * static_cast<double>(ngrid);
+  return on;
 }
 
 #endif
