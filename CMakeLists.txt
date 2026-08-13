@@ -78,7 +78,16 @@ if(USE_DPI)
    set(SRC_DPI src/Main/RegPlugin.cpp src/Core/DiagnosticHook.cpp src/Core/DiagnosticHookBeam.cpp src/Core/DiagnosticHookLI.cpp)
 endif()
 
+# keep frame pointers so perf/xctrace get reliable call stacks with -O3
+option(ENABLE_PROFILING "Keep frame pointers for profiling" OFF)
+if(ENABLE_PROFILING)
+    add_compile_options(-fno-omit-frame-pointer)
+endif()
 
+# OFF skips re-running git-hash.cmake on every build (fewer relinks while
+# iterating); version.h is still generated once if it does not exist yet
+option(UPDATE_VERSION "Update version.h" ON)
+if (UPDATE_VERSION OR NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/include/version.h)
 add_custom_command(
     OUTPUT
     ${CMAKE_CURRENT_BINARY_DIR}/include/version.h
@@ -88,6 +97,7 @@ add_custom_command(
     WORKING_DIRECTORY
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+endif()
 
 add_custom_target(
     get_git_hash
