@@ -763,9 +763,11 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
 
     complex<double> *in  = nullptr;
     complex<double> *out = nullptr;
-    fftw_plan p;
+    fftw_plan p = nullptr;
     const bool do_fft = filter["fft"];
-    obtain_FFT_resources(ngrid, &in, &out, &p);
+    if (do_fft) {
+        obtain_FFT_resources(ngrid, &in, &out, &p);
+    }
 #endif
 
 
