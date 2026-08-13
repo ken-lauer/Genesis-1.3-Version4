@@ -35,9 +35,10 @@ constexpr int dpacket_width = Eigen::internal::packet_traits<double>::size;
 constexpr int cpacket_width =
     Eigen::internal::packet_traits<std::complex<double>>::size;
 
-// Doubles: a full particles_simd_pad (= cache line) per batch, i.e. 4 packets
-// on NEON down to 1 on AVX-512. Complex: two packets per batch - enough to
-// pair the mul-add chains without inflating tridagx's per-lane gather/scatter.
+// Doubles: a full particles_simd_pad per batch - 4 packets on NEON, 2 on
+// AVX2 and AVX-512 (16 doubles there). Complex: two packets per batch -
+// enough to pair the mul-add chains without inflating tridagx's per-lane
+// gather/scatter.
 constexpr int dbatch_width = static_cast<int>(particles_simd_pad);
 constexpr int cbatch_width = 2 * cpacket_width;
 
@@ -60,10 +61,14 @@ static_assert(
 // must not contribute: reductions and scatters. Plain loads/stores of the
 // padded component arrays themselves never need it.
 inline dmask tail_mask(std::size_t count) {
-  alignas(64) static constexpr double iota[particles_simd_pad] = {
-      0., 1., 2., 3., 4., 5., 6., 7.};
-  static_assert(particles_simd_pad == 8, "iota table must match the pad width");
-  return dbatch::MapAligned(iota) < static_cast<double>(count);
+  alignas(64) static constexpr std::array<double, particles_simd_pad> iota = [] {
+    std::array<double, particles_simd_pad> a{};
+    for (std::size_t i = 0; i < a.size(); i++) {
+      a[i] = static_cast<double>(i);
+    }
+    return a;
+  }();
+  return dbatch::MapAligned(iota.data()) < static_cast<double>(count);
 }
 
 // sin and cos of one batch of angles, sharing the argument reduction.
