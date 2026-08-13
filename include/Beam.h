@@ -52,7 +52,7 @@ class Beam{
    bool dbg_skip_shrink();
    void make_compact();
 
-   vector< vector<Particle> > beam;
+   vector<Particles> beam;
    vector<double> current,eloss,longESC;
 
 

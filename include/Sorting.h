@@ -23,20 +23,20 @@ class Sorting{
 
   void init(int,int, bool, bool);
   void configure(double,double,double,double,double,double, bool);
-  void globalSort(vector< vector< Particle > > *);
+  void globalSort(vector<Particles> *);
 
-  int sort(vector< vector< Particle > > *);
+  int sort(vector<Particles> *);
 
 
  private:
   void shrink_pushvectors(void);
   void update_stats(unsigned long long &, unsigned long long &);
   void globalSort_completion_msg(void);
-  void fillPushVectors(vector< vector< Particle > > *);
-  void localSort(vector< vector< Particle > > *);
-  int centerShift(vector< vector< Particle > > *);
+  void fillPushVectors(vector<Particles> *);
+  void localSort(vector<Particles> *);
+  int centerShift(vector<Particles> *);
   void send(int, vector<double> *);
-  void recv(int, vector<vector< Particle > >*, vector<double> *);
+  void recv(int, vector<Particles>*, vector<double> *);
   
   int rank,size;
 

@@ -24,15 +24,17 @@ public:
     EFieldSolver();
     virtual ~EFieldSolver();
     void init(double, int, int, int, double, bool);
-    void shortRange(vector<Particle> *, double, double, int);
+    void shortRange(Particles *, double, double, int);
     void longRange(Beam *beam, double gamma, double aw);
     double getEField(unsigned long i);
+    // for batched loads; sized and zeroed through padded_count(npart) by shortRange
+    const double *getEFieldData() const { return ez.data(); }
     bool hasShortRange() const;
     void allocateForOutput(unsigned long nslice);
     double getSCField(int);
 
 private:
-    void analyseBeam(vector<Particle> *beam);
+    void analyseBeam(Particles *beam);
     void constructLaplaceOperator();
     void tridiag();
 

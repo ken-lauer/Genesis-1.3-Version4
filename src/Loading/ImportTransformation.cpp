@@ -99,7 +99,7 @@ bool ImportTransformation::init(int rank_in, std::map<std::string,std::string> *
     return true;
 }
 
-void ImportTransformation::applyMatrix(vector<vector<Particle>> &beam) {
+void ImportTransformation::applyMatrix(vector<Particles> &beam) {
 
     bool interpolate = false;
     if ((nmat > 1) && (slen>0)) {interpolate = true;}
@@ -156,7 +156,7 @@ void ImportTransformation::applyMatrix(vector<vector<Particle>> &beam) {
     }
 }
 
-void ImportTransformation::applyVector(vector<vector<Particle>> &beam) {
+void ImportTransformation::applyVector(vector<Particles> &beam) {
 
     bool interpolate = false;
     if ((nvec > 1) && (slen>0)) {interpolate = true;}

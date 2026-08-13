@@ -11,6 +11,8 @@
 #include "Output.h"
 #include "Setup.h"
 
+#include "SimdBatch.h"
+
 Diagnostic::Diagnostic()
 {
 	MPI_Comm_rank(MPI_COMM_WORLD, &my_rank_);
@@ -412,27 +414,42 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
-        for (auto const &par: slice) {
-            x1 += par.x;
-            x2 += par.x * par.x;
-            y1 += par.y;
-            y2 += par.y * par.y;
-            g1 += par.gamma;
-            g2 += par.gamma * par.gamma;
-            px1 += par.px;
-            py1 += par.py;
-            px2 += par.px * par.px;
-            py2 += par.py * par.py;
-            xpx += par.x * par.px;
-            ypy += par.y * par.py;
-//           complex<double> phasor = complex<double> (cos(par.theta),sin(par.theta));
-//           complex<double> phasor_acc = phasor;
-//           b[0] += phasor;
+        // beam moments, batched over particles
+        {
+            const double *x_s = slice.x();
+            const double *y_s = slice.y();
+            const double *px_s = slice.px();
+            const double *py_s = slice.py();
+            const double *g_s = slice.gamma();
+            const auto sums = batch_sum<12>(static_cast<int>(slice.size()),
+                                            [&](int ip) -> std::array<dbatch, 12> {
+                const dbatch x = dbatch::MapAligned(x_s + ip);
+                const dbatch y = dbatch::MapAligned(y_s + ip);
+                const dbatch px = dbatch::MapAligned(px_s + ip);
+                const dbatch py = dbatch::MapAligned(py_s + ip);
+                const dbatch g = dbatch::MapAligned(g_s + ip);
+                return {x, x * x, y, y * y, g, g * g,
+                        px, py, px * px, py * py, x * px, y * py};
+            });
+            x1 = sums[0]; x2 = sums[1];
+            y1 = sums[2]; y2 = sums[3];
+            g1 = sums[4]; g2 = sums[5];
+            px1 = sums[6]; py1 = sums[7];
+            px2 = sums[8]; py2 = sums[9];
+            xpx = sums[10]; ypy = sums[11];
+        }
+        // bunching phasors, batched over particles, one pass per harmonic so
+        // the accumulators stay in batch registers
+        {
+            const double *th_s = slice.theta();
+            const int np = static_cast<int>(slice.size());
             for (int iharm = 0; iharm < nharm; iharm++) {
-                //              phasor_acc *= phasor;
-//               b[iharm]+=phasor_acc;
-                b[iharm] += complex<double>(cos((iharm + 1) * par.theta), sin((iharm + 1) * par.theta));
-//                b[iharm]+=phasor*phasor;
+                const double h = static_cast<double>(iharm + 1);
+                const auto [re, im] = batch_sum<2>(np, [&](int ip) -> std::array<dbatch, 2> {
+                    const dbatch th = h * dbatch::MapAligned(th_s + ip);
+                    return {th.cos(), th.sin()};
+                });
+                b[iharm] += complex<double>(re, im);
             }
         }
         if (filter["aux"]) {
@@ -747,9 +764,64 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
     complex<double> *in  = nullptr;
     complex<double> *out = nullptr;
     fftw_plan p;
+    const bool do_fft = filter["fft"];
     obtain_FFT_resources(ngrid, &in, &out, &p);
 #endif
 
+
+    // Row moment weights with each dx duplicated into (dx, dx) pairs: viewing
+    // a complex row as 2*ngrid doubles, |c|^2 * dx = re^2*dx + im^2*dx, so the
+    // weighted moments reduce to pure double multiply-sums over the raw
+    // interleaved storage - no per-element complex norm (which Eigen cannot
+    // vectorize) and no de-interleaving.
+    Eigen::ArrayXd dxv(2 * ngrid);
+    for (int ix = 0; ix < ngrid; ix++) {
+        dxv(2 * ix) = static_cast<double>(ix) + shift;
+        dxv(2 * ix + 1) = dxv(2 * ix);
+    }
+    const Eigen::ArrayXd dx2v = dxv.square();
+
+    // Single fused pass over one interleaved row segment, accumulators in
+    // registers: power and x-moments of |c|^2, plus (optionally) the plain
+    // field sum recovered from the even/odd lanes of a batch accumulator.
+    // `w`/`w2` are the duplicated weights aligned with v's dx positions.
+    auto seg_moments = [](const double *v, const double *w, const double *w2, int len,
+                          double &pow_, double &x1_, double &x2_, complex<double> *fsum) {
+        dbatch accp = dbatch::Zero();
+        dbatch acc1 = dbatch::Zero();
+        dbatch acc2 = dbatch::Zero();
+        dbatch accf = dbatch::Zero();
+        int k = 0;
+        for (; k + dbatch_width <= len; k += dbatch_width) {
+            const dbatch vv = dbatch::Map(v + k);
+            const dbatch sq = vv * vv;
+            accp += sq;
+            acc1 += sq * dbatch::Map(w + k);
+            acc2 += sq * dbatch::Map(w2 + k);
+            if (fsum != nullptr) { accf += vv; }
+        }
+        double re = 0;
+        double im = 0;
+        for (; k < len; k += 2) {  // interleaved remainder, one complex at a time
+            const double sq = v[k] * v[k] + v[k + 1] * v[k + 1];
+            pow_ += sq;
+            x1_ += sq * w[k];
+            x2_ += sq * w2[k];
+            re += v[k];
+            im += v[k + 1];
+        }
+        pow_ += accp.sum();
+        x1_ += acc1.sum();
+        x2_ += acc2.sum();
+        if (fsum != nullptr) {
+            static_assert(dbatch_width % 2 == 0, "lane parity needs an even batch");
+            for (int l = 0; l < dbatch_width; l += 2) {
+                re += accf(l);
+                im += accf(l + 1);
+            }
+            *fsum += complex<double>(re, im);
+        }
+    };
 
     for (auto const &slice :field->field) {
         int is = (ns + is0 - field->first) % ns;
@@ -761,22 +833,13 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
         complex<double> loc;
         complex<double> ff = complex<double>(0, 0);
         for (int iy = 0; iy < ngrid; iy++) {
-            double dy = static_cast<double>(iy) + shift;
-            for (int ix = 0; ix < ngrid; ix++) {
-                double dx = static_cast<double>(ix) + shift;
-                int i = iy * ngrid + ix;
-                loc = slice.at(i);
-#ifdef FFTW
-                in[i]=loc;   // field for the FFT
-#endif
-                double wei = loc.real() * loc.real() + loc.imag() * loc.imag();
-                ff += loc;
-                power += wei;
-                x1 += dx * wei;
-                x2 += dx * dx * wei;
-                y1 += dy * wei;
-                y2 += dy * dy * wei;
-            }
+            const double dy = static_cast<double>(iy) + shift;
+            const double *rowp = reinterpret_cast<const double *>(slice.data() + iy * ngrid);
+            double rowpow = 0;
+            seg_moments(rowp, dxv.data(), dx2v.data(), 2 * ngrid, rowpow, x1, x2, &ff);
+            power += rowpow;
+            y1 += dy * rowpow;
+            y2 += dy * dy * rowpow;
         }
 
 #ifdef FFTW
@@ -786,23 +849,24 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
         double fy1=0;
         double fy2=0;
 
-        if (filter["fft"]){
+        if (do_fft){
+            std::copy(slice.begin(), slice.end(), in);
             fftw_execute(p);
+            // moments of the fftshift-ed spectrum: source column (ix+h)%ngrid
+            // splits each row into two contiguous segments
+            const int h = (ngrid + 1) / 2;
             for (int iy=0;iy<ngrid;iy++){
-                double dy=static_cast<double>(iy)+shift;
-                for (int ix=0;ix<ngrid;ix++){
-                    double dx=static_cast<double>(ix)+shift;
-                    int iiy=(iy+(ngrid+1)/2) % ngrid;
-                    int iix=(ix+(ngrid+1)/2) % ngrid;
-                    int ii=iiy*ngrid+iix;
-                    loc=out[ii];
-                    double wei=loc.real()*loc.real()+loc.imag()*loc.imag();
-                    fpower+=wei;
-                    fx1+=dx*wei;
-                    fx2+=dx*dx*wei;
-                    fy1+=dy*wei;
-                    fy2+=dy*dy*wei;
-                }
+                const double dy=static_cast<double>(iy)+shift;
+                const int iiy=(iy+h) % ngrid;
+                const double *orow = reinterpret_cast<const double *>(out + iiy * ngrid);
+                double rowpow = 0;
+                seg_moments(orow + 2 * h, dxv.data(), dx2v.data(), 2 * (ngrid - h),
+                            rowpow, fx1, fx2, nullptr);
+                seg_moments(orow, dxv.data() + 2 * (ngrid - h), dx2v.data() + 2 * (ngrid - h),
+                            2 * h, rowpow, fx1, fx2, nullptr);
+                fpower += rowpow;
+                fy1 += dy * rowpow;
+                fy2 += dy * dy * rowpow;
             }
         }
 #endif

@@ -10,46 +10,7 @@ void FieldSolverFFT::advance(double delz, Field *field, Beam *beam, Undulator *u
 
     for (unsigned long ii = 0; ii < field->field.size(); ii++) {  // ii is index for the beam
 
-        // clear source term
-        for (int ig = 0; ig < ngrid * ngrid; ig++) {
-            crsource[ig] = 0;
-        }
-
-        // constructing source term
-        int harm = field->getHarm();
-        if (und->inUndulator() && field->isEnabled() && (harm % 2 == 1)) { // do not need to calculate for even harmonics
-            double scl = und->fc(harm) * vacimp * beam->current[ii] * field->xks * delz;
-            scl /= 4 * eev * static_cast<double>(beam->beam[ii].size()) * field->dgrid * field->dgrid;
-            complex<double> cpart;
-            double part, weight, wx, wy;
-            int idx;
-
-            for (auto & particle : beam->beam.at(ii)) {
-                double x = particle.x;
-                double y = particle.y;
-                double theta = static_cast<double>(harm) * particle.theta;
-                double gamma = particle.gamma;
-
-                if (field->getLLGridpoint(x, y, &wx, &wy, &idx)) {
-
-                    part = sqrt(und->faw2(x, y)) * scl / gamma;
-                    // tmp  should be also normalized with beta parallel
-                    cpart = complex<double>(sin(theta), cos(theta)) * part;
-
-                    weight = wx * wy;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * wy;
-                    idx++;
-                    crsource[idx] += weight * cpart;
-                    weight = wx * (1 - wy);
-                    idx += ngrid - 1;
-                    crsource[idx] += weight * cpart;
-                    weight = (1 - wx) * (1 - wy);
-                    idx++;
-                    crsource[idx] += weight * cpart;
-                }
-            }
-        }  // end of source term construction
+        field->constructSource(crsource, beam, und, delz, ii);
 
         unsigned long i = (ii + field->first) % field->field.size();           // index for the field
 

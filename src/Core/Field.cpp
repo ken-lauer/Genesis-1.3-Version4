@@ -1,7 +1,9 @@
 
 #include "Field.h"
+#include "Beam.h"
 #include "FieldSolverADI.h"
 #include "FieldSolverFFT.h"
+#include <algorithm>
 #include <fstream>
 
 
@@ -171,6 +173,58 @@ bool Field::getLLGridpoint(double x, double y, double *wx, double *wy, int *idx)
       } else {
            return false;
       }
+}
+
+// Source term of one beam slice, shared by the ADI and FFT solvers (which own
+// the crsource grid). Everything is batched except the scatter onto the four
+// surrounding grid points, which stays scalar per lane. The scatter is a side
+// effect, so off-grid lanes and tail lanes (replicas of the last particle)
+// must not deposit.
+void Field::constructSource(vector<complex<double>> &crsource, Beam *beam,
+                            Undulator *und, double delz, unsigned long islice)
+{
+    std::fill(crsource.begin(), crsource.end(), complex<double>(0));
+
+    // no source needed for even harmonics
+    if (!und->inUndulator() || !this->isEnabled() || (harm % 2 == 0)) { return; }
+
+    double scl = und->fc(harm) * vacimp * beam->current[islice] * xks * delz;
+    scl /= 4 * eev * static_cast<double>(beam->beam[islice].size()) * dgrid * dgrid;
+
+    // scatter one particle onto its four surrounding grid points
+    auto deposit = [&](const complex<double> &cpart, double wx, double wy, int idx) {
+        crsource[idx] += wx * wy * cpart;
+        crsource[idx + 1] += (1 - wx) * wy * cpart;
+        idx += ngrid;
+        crsource[idx] += wx * (1 - wy) * cpart;
+        crsource[idx + 1] += (1 - wx) * (1 - wy) * cpart;
+    };
+
+    const auto &particles = beam->beam.at(islice);
+    const double *x_s = particles.x();
+    const double *y_s = particles.y();
+    const double *th_s = particles.theta();
+    const double *g_s = particles.gamma();
+    const int np = static_cast<int>(particles.size());
+    const UndTransverse utp = und->transverseParams();
+    const double dharm = static_cast<double>(harm);
+
+    for (int ip = 0; ip < np; ip += dbatch_width) {
+        const dbatch x = dbatch::MapAligned(x_s + ip);
+        const dbatch y = dbatch::MapAligned(y_s + ip);
+        dbatch wx, wy, idx;
+        const dmask on = getLLGridpointBatch(x, y, wx, wy, idx);
+        // off-grid lanes get 0 so the sqrt below stays NaN-free
+        const dbatch f2 = on.select(utp.faw2(x, y), 0.);
+        const dbatch harmth = dharm * dbatch::MapAligned(th_s + ip);
+        // tmp  should be also normalized with beta parallel
+        const dbatch part = f2.sqrt() * scl / dbatch::MapAligned(g_s + ip);
+        for_each_lane(on, np - ip,
+                      [&](int l, double wxl, double wyl, double idxl, double re, double im) {
+                          deposit(complex<double>(re, im), wxl, wyl, static_cast<int>(idxl));
+                      },
+                      wx, wy, idx, harmth.sin() * part, harmth.cos() * part);
+    }
 }
 
 

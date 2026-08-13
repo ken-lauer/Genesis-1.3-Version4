@@ -47,7 +47,7 @@ void Sorting::configure(double s0_in, double slicelen_in, double sendmin_in, dou
 
 
 
-int Sorting::sort(vector <vector <Particle> > * recdat){
+int Sorting::sort(vector<Particles> * recdat){
 
 
   if (!dosort) {
@@ -71,7 +71,7 @@ int Sorting::sort(vector <vector <Particle> > * recdat){
 }
 
 
-void Sorting::localSort(vector <vector <Particle> > * recdat)  // most arguments are now part of the class
+void Sorting::localSort(vector<Particles> * recdat)  // most arguments are now part of the class
 {
  
   Particle p;  
@@ -188,7 +188,7 @@ void Sorting::globalSort_completion_msg(void)
 
 // routine which moves all particles, which are misplaced in the given domain of the node to other nodes.
 // the methods is an iterative bubble sort, pushing excess particles to next node. There the fitting particles are collected the rest moved further.
-void Sorting::globalSort(vector <vector <Particle> > *rec)
+void Sorting::globalSort(vector<Particles> *rec)
 {
   this->fillPushVectors(rec);   // here is the actual sorting to fill the vectore pushforward and pushbackward
   if (rank==(size-1)) { pushforward.clear(); }        
@@ -295,7 +295,7 @@ void Sorting::send(int target, vector<double> *data)
 }
 
 
-void Sorting::recv(int source, vector <vector <Particle> > *rec ,vector<double> *olddata)
+void Sorting::recv(int source, vector<Particles> *rec ,vector<double> *olddata)
 {
    double shift=slen;
    if(globalframe){shift=0;}
@@ -364,7 +364,7 @@ void Sorting::recv(int source, vector <vector <Particle> > *rec ,vector<double> 
 
 
 
-void Sorting::fillPushVectors(vector< vector <Particle> >*rec)
+void Sorting::fillPushVectors(vector<Particles> *rec)
 {
   if (rank == 0) {
     cout << "Global Sorting: Slicelength: " << slen << " - Send backwards for theta < " << sendmin << " - Send forward for theta > " << sendmax << endl; 
@@ -433,7 +433,7 @@ void Sorting::fillPushVectors(vector< vector <Particle> >*rec)
 }
 
 
-int Sorting::centerShift(vector <vector <Particle> > * recdat)
+int Sorting::centerShift(vector<Particles> * recdat)
 {
   if (!doshift){ return 0;}
 
