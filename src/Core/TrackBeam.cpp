@@ -106,8 +106,8 @@ void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px, con
   if (mode == QuadMode::Focus){
     dbatch foc=(qf/gammaz).sqrt();
     dbatch omg=foc*delz;
-    dbatch s1=omg.sin();
-    dbatch a1=omg.cos();
+    dbatch s1, a1;
+    sincos(omg, s1, a1);
     dbatch a2=s1/foc;
     dbatch a3=-a2*foc*foc;
     dbatch xtmp=x-dx;

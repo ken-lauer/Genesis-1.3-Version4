@@ -96,9 +96,10 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
                 const double *th_s = slice.theta();
                 const auto [re, im] = batch_sum<2>(static_cast<int>(slice.size()),
                                                    [&](int ip) -> std::array<dbatch, 2> {
-                    const dbatch th = dbatch::MapAligned(th_s + ip);
                     const dbatch dg = dbatch::MapAligned(g_s + ip) - gamavg;
-                    return {dg * th.cos(), dg * th.sin()};
+                    dbatch s, c;
+                    sincos(dbatch::MapAligned(th_s + ip), s, c);
+                    return {dg * c, dg * s};
                 });
                 emod = complex<double>(re, im);
             }

@@ -446,8 +446,9 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
             for (int iharm = 0; iharm < nharm; iharm++) {
                 const double h = static_cast<double>(iharm + 1);
                 const auto [re, im] = batch_sum<2>(np, [&](int ip) -> std::array<dbatch, 2> {
-                    const dbatch th = h * dbatch::MapAligned(th_s + ip);
-                    return {th.cos(), th.sin()};
+                    dbatch s, c;
+                    sincos(h * dbatch::MapAligned(th_s + ip), s, c);
+                    return {c, s};
                 });
                 b[iharm] += complex<double>(re, im);
             }
