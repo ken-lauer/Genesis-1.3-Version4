@@ -22,9 +22,13 @@ typedef struct{
 } Particle;
 
 // Component arrays are physically sized to a multiple of this (in doubles) so
-// SIMD kernels can always run whole batches, tail included. Must be a multiple
-// of every batch width in use - enforced by a static_assert in SimdBatch.h.
-inline constexpr std::size_t particles_simd_pad = 8;
+// SIMD kernels can always run whole batches, tail included. Two hardware
+// packets (at least one cache line) per batch, so the serial per-batch
+// dependency chains in the kernels always have a second packet of independent
+// work to overlap with: 8 on NEON/AVX2, 16 on AVX-512. Must be a multiple of
+// every batch width in use - enforced by static_asserts in SimdBatch.h.
+inline constexpr std::size_t particles_simd_pad =
+    std::max<std::size_t>(8, 2 * Eigen::internal::packet_traits<double>::size);
 
 constexpr std::size_t padded_count(std::size_t n)
 {
