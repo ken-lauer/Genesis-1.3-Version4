@@ -217,13 +217,15 @@ void Field::constructSource(vector<complex<double>> &crsource, Beam *beam,
         // off-grid lanes get 0 so the sqrt below stays NaN-free
         const dbatch f2 = on.select(utp.faw2(x, y), 0.);
         const dbatch harmth = dharm * dbatch::MapAligned(th_s + ip);
+        dbatch sh, ch;
+        sincos(harmth, sh, ch);
         // tmp  should be also normalized with beta parallel
         const dbatch part = f2.sqrt() * scl / dbatch::MapAligned(g_s + ip);
         for_each_lane(on, np - ip,
                       [&](int l, double wxl, double wyl, double idxl, double re, double im) {
                           deposit(complex<double>(re, im), wxl, wyl, static_cast<int>(idxl));
                       },
-                      wx, wy, idx, harmth.sin() * part, harmth.cos() * part);
+                      wx, wy, idx, sh * part, ch * part);
     }
 }
 

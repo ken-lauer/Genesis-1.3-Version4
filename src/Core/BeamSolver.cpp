@@ -221,8 +221,8 @@ void ODE(dbatch &k2gg, dbatch &k2pp, const dbatch &tgam, const dbatch &tthet, co
         const dbatch angle = prm.rharm[i] * tthet;
         // rpart * (cos - i sin)
         const auto [re, im] = prm.rpart(i);
-        const dbatch s = angle.sin();
-        const dbatch c = angle.cos();
+        dbatch s, c;
+        sincos(angle, s, c);
         ctmp_re += re * c + im * s;
         ctmp_im += im * c - re * s;
     }

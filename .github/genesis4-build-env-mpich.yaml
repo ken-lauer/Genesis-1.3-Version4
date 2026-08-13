@@ -9,3 +9,4 @@ dependencies:
   - hdf5 * mpi_mpich*
   - mpich
   - eigen
+  - xsimd
