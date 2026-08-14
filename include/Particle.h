@@ -255,6 +255,14 @@ public:
     const_iterator cbegin() const { return begin(); }
     const_iterator cend() const { return end(); }
 
+    // restore the padding invariant: slots in [n_, padded) replicate particle
+    // n_-1. Call after filling elements by index following a resize().
+    void repad()
+    {
+        if (n_ == 0 || gamma_.size() == n_) { return; }
+        for_each_array([&](dvec &a) { std::fill(a.begin() + n_, a.end(), a[n_ - 1]); });
+    }
+
     // raw component spans for the SIMD kernels (contiguous, packet-aligned)
     double *gamma() { return gamma_.data(); }
     double *theta() { return theta_.data(); }
@@ -279,13 +287,6 @@ private:
     void for_each_array(F &&f)
     {
         f(gamma_); f(theta_); f(x_); f(y_); f(px_); f(py_);
-    }
-
-    // restore the padding invariant: slots in [n_, padded) replicate particle n_-1
-    void repad()
-    {
-        if (n_ == 0 || gamma_.size() == n_) { return; }
-        for_each_array([&](dvec &a) { std::fill(a.begin() + n_, a.end(), a[n_ - 1]); });
     }
 
     dvec gamma_, theta_, x_, y_, px_, py_;

@@ -447,11 +447,13 @@ bool SDDSBeam::init(int inrank, int insize, map<string,string> *arg, Beam *beam,
       sn.setSlice(islice+node_off);
       sn.applyShotNoise(work,mpart*nbins,nbins,ne);
       for (int i=0;i<mpart*nbins;i++){
-      	beam->beam.at(islice).at(i).theta=work[i].theta;  
+      	beam->beam.at(islice).at(i).theta=work[i].theta;
       }
 
     }
-   
+    // mirroring fills by index after resize; both branches rewrite theta
+    beam->beam.at(islice).repad();
+
   }
 
 
