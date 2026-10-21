@@ -90,6 +90,11 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
             }
             gamavg *= norm;
 
+            // === original: DiagBeamUser::getValues particle loop (master 5b34ee6) ===
+            // for (auto const &par: slice) {
+            //     emod += (par.gamma-gamavg) * complex<double>(cos(par.theta),sin(par.theta));
+            // }
+            // === end original ===
             // loop over the particles in each slice, sincos batched
             {
                 const double *g_s = slice.gamma();

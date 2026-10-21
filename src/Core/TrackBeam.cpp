@@ -56,11 +56,35 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
     if (angle!=0) { this->applyChicane(beam,angle,lb,ld,lt,gamma0); }
   }
   // handle the different cases (drift, focusing and defocusing)
+  // === original: TrackBeam::track (master 5b34ee6) — selection via member
+  // function pointers ApplyX/ApplyY, replaced by the QuadMode enum ===
+  // if (qx==0){
+  //   this->ApplyX=&TrackBeam::applyDrift;
+  // }else{
+  //   xoff=xoff/qx;
+  //   if (qx>0){
+  //     this->ApplyX=&TrackBeam::applyFQuad;
+  //   } else {
+  //     this->ApplyX=&TrackBeam::applyDQuad;
+  //   }
+  // }
+  // (same for qy/yoff/ApplyY)
+  // === end original ===
   if (qx!=0){ xoff=xoff/qx; }
   if (qy!=0){ yoff=yoff/qy; }
   const QuadMode modeX = quadMode(qx);
   const QuadMode modeY = quadMode(qy);
 
+  // === original: TrackBeam::track per-particle loop (master 5b34ee6) ===
+  // for (int i=0; i<beam->beam.size();i++){
+  //   for (int j=0; j<beam->beam.at(i).size();j++){
+  //     Particle *p=&beam->beam.at(i).at(j);
+  //     double gammaz=sqrt(p->gamma*p->gamma-1- aw*aw - p->px*p->px - p->py*p->py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
+  //     (this->*ApplyX)(delz,qx,&(p->x),&(p->px),gammaz,xoff);
+  //     (this->*ApplyY)(delz,qy,&(p->y),&(p->py),gammaz,yoff);
+  //   }
+  // }
+  // === end original ===
   for (int i=0; i<beam->beam.size();i++){
     auto &slice = beam->beam.at(i);
     double *x_s = slice.x();
@@ -97,6 +121,37 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
 
 // the mode is uniform for all particles of a step, so the per-particle math
 // is branch-free
+//
+// === original: three separate scalar routines (master 5b34ee6) ===
+// void TrackBeam::applyDrift(double delz, double qf, double *x, double *px, double gammaz, double dx)
+// {
+//   *x+=(*px)*delz/gammaz;
+// }
+//
+// void TrackBeam::applyFQuad(double delz, double qf, double *x, double *px, double gammaz, double dx)
+// {
+//   double foc=sqrt(qf/gammaz);
+//   double omg=foc*delz;
+//   double a1=cos(omg);
+//   double a2=sin(omg)/foc;
+//   double a3=-a2*foc*foc;
+//   double xtmp=*x-dx;
+//   *x =a1*xtmp+a2*(*px)/gammaz+dx;
+//   *px=a3*xtmp*gammaz+a1*(*px);
+// }
+//
+// void TrackBeam::applyDQuad(double delz, double qf, double *x, double *px, double gammaz, double dx)
+// {
+//   double foc=sqrt(-qf/gammaz);
+//   double omg=foc*delz;
+//   double a1=cosh(omg);
+//   double a2=sinh(omg)/foc;
+//   double a3=a2*foc*foc;
+//   double xtmp=*x-dx;
+//   *x =a1*xtmp+a2*(*px)/gammaz+dx;
+//   *px=a3*xtmp*gammaz+a1*(*px);
+// }
+// === end original ===
 void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px, const dbatch &gammaz, double dx)
 {
   if (mode == QuadMode::Drift){

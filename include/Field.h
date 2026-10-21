@@ -143,6 +143,8 @@ inline int Field::getHarm()
   return harm;
 }
 
+// original: the scalar Field::getLLGridpoint in Field.cpp (unchanged on this
+// branch) — same bounds test, weights and lower-left index, computed per lane
 inline dmask Field::getLLGridpointBatch(const dbatch &x, const dbatch &y,
                                         dbatch &wx, dbatch &wy, dbatch &idx) const
 {

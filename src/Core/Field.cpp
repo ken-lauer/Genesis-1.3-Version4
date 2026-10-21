@@ -180,6 +180,49 @@ bool Field::getLLGridpoint(double x, double y, double *wx, double *wy, int *idx)
 // surrounding grid points, which stays scalar per lane. The scatter is a side
 // effect, so off-grid lanes and tail lanes (replicas of the last particle)
 // must not deposit.
+//
+// === original: duplicated inline in FieldSolverADI::advance and
+// FieldSolverFFT::advance (master 5b34ee6) ===
+// // clear source term
+// for (int ig = 0; ig < ngrid * ngrid; ig++) {
+//     crsource[ig] = 0;
+// }
+// // constructing source term
+// int harm = field->getHarm();
+// if (und->inUndulator() && field->isEnabled() && (harm % 2 == 1)) { // do not need to calculate for even harmonics
+//     double scl = und->fc(harm) * vacimp * beam->current[ii] * field->xks * delz;
+//     scl /= 4 * eev * static_cast<double>(beam->beam[ii].size()) * field->dgrid * field->dgrid;
+//     complex<double> cpart;
+//     double part, weight, wx, wy;
+//     int idx;
+//
+//     for (auto & particle : beam->beam.at(ii)) {
+//         double x = particle.x;
+//         double y = particle.y;
+//         double theta = static_cast<double>(harm) * particle.theta;
+//         double gamma = particle.gamma;
+//
+//         if (field->getLLGridpoint(x, y, &wx, &wy, &idx)) {
+//
+//             part = sqrt(und->faw2(x, y)) * scl / gamma;
+//             // tmp  should be also normalized with beta parallel
+//             cpart = complex<double>(sin(theta), cos(theta)) * part;
+//
+//             weight = wx * wy;
+//             crsource[idx] += weight * cpart;
+//             weight = (1 - wx) * wy;
+//             idx++;
+//             crsource[idx] += weight * cpart;
+//             weight = wx * (1 - wy);
+//             idx += ngrid - 1;
+//             crsource[idx] += weight * cpart;
+//             weight = (1 - wx) * (1 - wy);
+//             idx++;
+//             crsource[idx] += weight * cpart;
+//         }
+//     }
+// }  // end of source term construction
+// === end original ===
 void Field::constructSource(vector<complex<double>> &crsource, Beam *beam,
                             Undulator *und, double delz, unsigned long islice)
 {

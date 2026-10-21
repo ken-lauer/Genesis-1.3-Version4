@@ -414,6 +414,26 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
+        // === original: DiagBeam::getValues particle loop (master 5b34ee6) —
+        // moments and bunching phasors accumulated in one pass ===
+        // for (auto const &par: slice) {
+        //     x1 += par.x;
+        //     x2 += par.x * par.x;
+        //     y1 += par.y;
+        //     y2 += par.y * par.y;
+        //     g1 += par.gamma;
+        //     g2 += par.gamma * par.gamma;
+        //     px1 += par.px;
+        //     py1 += par.py;
+        //     px2 += par.px * par.px;
+        //     py2 += par.py * par.py;
+        //     xpx += par.x * par.px;
+        //     ypy += par.y * par.py;
+        //     for (int iharm = 0; iharm < nharm; iharm++) {
+        //         b[iharm] += complex<double>(cos((iharm + 1) * par.theta), sin((iharm + 1) * par.theta));
+        //     }
+        // }
+        // === end original ===
         // beam moments, batched over particles
         {
             const double *x_s = slice.x();
@@ -784,6 +804,27 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
     }
     const Eigen::ArrayXd dx2v = dxv.square();
 
+    // === original: DiagField::getValues grid loop (master 5b34ee6) — one
+    // scalar pass per slice, replaced by the seg_moments row passes below ===
+    // for (int iy = 0; iy < ngrid; iy++) {
+    //     double dy = static_cast<double>(iy) + shift;
+    //     for (int ix = 0; ix < ngrid; ix++) {
+    //         double dx = static_cast<double>(ix) + shift;
+    //         int i = iy * ngrid + ix;
+    //         loc = slice.at(i);
+    // #ifdef FFTW
+    //         in[i]=loc;   // field for the FFT
+    // #endif
+    //         double wei = loc.real() * loc.real() + loc.imag() * loc.imag();
+    //         ff += loc;
+    //         power += wei;
+    //         x1 += dx * wei;
+    //         x2 += dx * dx * wei;
+    //         y1 += dy * wei;
+    //         y2 += dy * dy * wei;
+    //     }
+    // }
+    // === end original ===
     // Single fused pass over one interleaved row segment, accumulators in
     // registers: power and x-moments of |c|^2, plus (optionally) the plain
     // field sum recovered from the even/odd lanes of a batch accumulator.
@@ -855,6 +896,24 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
         if (do_fft){
             std::copy(slice.begin(), slice.end(), in);
             fftw_execute(p);
+            // === original: spectrum moments (master 5b34ee6) ===
+            // for (int iy=0;iy<ngrid;iy++){
+            //     double dy=static_cast<double>(iy)+shift;
+            //     for (int ix=0;ix<ngrid;ix++){
+            //         double dx=static_cast<double>(ix)+shift;
+            //         int iiy=(iy+(ngrid+1)/2) % ngrid;
+            //         int iix=(ix+(ngrid+1)/2) % ngrid;
+            //         int ii=iiy*ngrid+iix;
+            //         loc=out[ii];
+            //         double wei=loc.real()*loc.real()+loc.imag()*loc.imag();
+            //         fpower+=wei;
+            //         fx1+=dx*wei;
+            //         fx2+=dx*dx*wei;
+            //         fy1+=dy*wei;
+            //         fy2+=dy*dy*wei;
+            //     }
+            // }
+            // === end original ===
             // moments of the fftshift-ed spectrum: source column (ix+h)%ngrid
             // splits each row into two contiguous segments
             const int h = (ngrid + 1) / 2;

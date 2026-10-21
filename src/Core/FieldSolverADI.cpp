@@ -93,6 +93,17 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
   auto F = [&](int off, int len) { return ccspan(fld + off, len); };
   auto S = [&](int off, int len) { return ccspan(src + off, len); };
 
+  // === original: FieldSolverADI::ADI, implicit direction in x (master 5b34ee6) ===
+  // for (idx=0;idx<ngrid;idx++){
+  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]);
+  // }
+  // for (idx=ngrid;idx<ngrid*(ngrid-1);idx++){
+  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]+crfield[idx-ngrid]);
+  // }
+  // for (idx=ngrid*(ngrid-1);idx<ngrid*ngrid;idx++){
+  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-ngrid]-2.0*crfield[idx]);
+  // }
+  // === end original ===
   // implicit direction in x: neighbors live at +-ngrid, so the first row, the
   // contiguous interior and the last row are one span each
   const int mid = n * (n - 2);
@@ -106,6 +117,17 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
   // solve tridiagonal system in x
   this->tridagx(crfield);
 
+  // === original: FieldSolverADI::ADI, implicit direction in y (master 5b34ee6) ===
+  // for(ix=0;ix<ngrid*ngrid;ix+=ngrid){
+  //   idx=ix;
+  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]);
+  //   for(idx=ix+1;idx<ix+ngrid-1;idx++){
+  //     r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]+crfield[idx-1]);
+  //   }
+  //   idx=ix+ngrid-1;
+  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-1]-2.0*crfield[idx]);
+  // }
+  // === end original ===
   // implicit direction in y: neighbors live at +-1 within each contiguous row
   for (int ix = 0; ix < n * n; ix += n) {
     rp[ix] = src[ix] + fld[ix] + cstep * (fld[ix + 1] - 2.0 * fld[ix]);
@@ -122,6 +144,19 @@ void FieldSolverADI::ADI(vector<complex<double> > &crfield)
 }
 
 
+// === original: FieldSolverADI::tridagx (master 5b34ee6) — the scalar tail
+// loop below is this code verbatim; tridagxRows runs the same recurrence on
+// cbatch_width rows per lane ===
+// for (int i = 0; i < ngrid * ngrid; i += ngrid) {
+//     u[i] = r[i] * cbet[0];
+//     for (int k = 1; k < ngrid; k++) {
+//         u[k + i] = (r[k + i] - c[k] * u[k + i - 1]) * cbet[k];
+//     }
+//     for (int k = ngrid - 2; k >= 0; k--) {
+//         u[k + i] -= cwet[k + 1] * u[k + i + 1];
+//     }
+// }
+// === end original ===
 void FieldSolverADI::tridagx(vector<complex<double > > &u) {
     const int n = static_cast<int>(ngrid);
     complex<double> *up = u.data();
@@ -150,6 +185,24 @@ void FieldSolverADI::tridagx(vector<complex<double > > &u) {
 
 // The recurrences run across rows (k), so each whole-row sweep is an
 // independent cwise expression.
+//
+// === original: FieldSolverADI::tridagy (master 5b34ee6) ===
+// for (int i = 0; i < ngrid; i++) {
+//     u[i] = r[i] * cbet[0];
+// }
+// for (int k = 1; k < ngrid; k++) {
+//     int n = k * ngrid;
+//     for (int i = 0; i < ngrid; i++) {
+//         u[n + i] = (r[n + i] - c[k] * u[n + i - ngrid]) * cbet[k];
+//     }
+// }
+// for (int k = ngrid - 2; k >= 0; k--) {
+//     int n = k * ngrid;
+//     for (int i = 0; i < ngrid; i++) {
+//         u[n + i] -= cwet[k + 1] * u[n + i + ngrid];
+//     }
+// }
+// === end original ===
 void FieldSolverADI::tridagy(vector<complex<double > > &u) {
     const int n = static_cast<int>(ngrid);
     complex<double> *up = u.data();

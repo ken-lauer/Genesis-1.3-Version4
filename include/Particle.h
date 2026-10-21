@@ -52,6 +52,14 @@ constexpr std::size_t padded_count(std::size_t n)
 // redundant) physics and may be stored back freely. Only operations with side
 // effects beyond the arrays themselves - reductions, scatters onto grids -
 // must mask the tail lanes (see batch_sum and tail_mask in SimdBatch.h).
+//
+// The container's own mutators (resize, push_back, pop_back) maintain the
+// invariant. Writes through element proxies do not: bulk fills that resize()
+// and then assign elements by index would leave the padding at the zeros the
+// resize produced (gamma = 0 makes tail lanes compute NaNs) and must call
+// repad() when done. Later proxy writes to existing particles merely leave
+// the padding stale - old, still-finite particle values - which the kernels
+// tolerate.
 class Particles {
 public:
     struct Ref {

@@ -103,6 +103,42 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
         const double *ez_s = efield.getEFieldData();
 
         const int np = static_cast<int>(beam_is.size());
+        // === original: BeamSolver::advance per-particle loop (master 5b34ee6) ===
+        // for (int ip = 0; ip < beam->beam.at(is).size(); ip++) {
+        //     gamma = beam->beam.at(is).at(ip).gamma;
+        //     theta = beam->beam.at(is).at(ip).theta + autophase; // add autophase here
+        //     double x = beam->beam.at(is).at(ip).x;
+        //     double y = beam->beam.at(is).at(ip).y;
+        //     double px = beam->beam.at(is).at(ip).px;
+        //     double py = beam->beam.at(is).at(ip).py;
+        //     double awloc = und->faw(x, y);                 // get the transverse dependence of the undulator field
+        //     btpar = 1 + px * px + py * py + aw * aw * awloc * awloc;
+        //     ez = efield.getEField(ip) + eloss;  // adding global long range space charge field to each particle
+        //     cpart = 0;
+        //     double wx, wy;
+        //     int idx;
+        //     for (int ifld = 0; ifld < nfld.size(); ifld++) {
+        //         auto islice = (is + field->at(nfld[ifld])->first) % field->at(nfld[ifld])->field.size();
+        //
+        //         if (field->at(nfld[ifld])->getLLGridpoint(x, y, &wx, &wy, &idx)) { // check whether particle is on grid
+        //             cpart = field->at(nfld[ifld])->field[islice].at(idx) * wx * wy;
+        //             idx++;
+        //             cpart += field->at(nfld[ifld])->field[islice].at(idx) * (1 - wx) * wy;
+        //             idx += field->at(nfld[ifld])->ngrid - 1;
+        //             cpart += field->at(nfld[ifld])->field[islice].at(idx) * wx * (1 - wy);
+        //             idx++;
+        //             cpart += field->at(nfld[ifld])->field[islice].at(idx) * (1 - wx) * (1 - wy);
+        //             rpart[ifld] = rtmp[ifld] * awloc * conj(cpart);
+        //         } else {
+        //             rpart[ifld] = 0;
+        //         }
+        //     }
+        //     this->RungeKutta(delz);
+        //
+        //     beam->beam.at(is).at(ip).gamma = gamma;
+        //     beam->beam.at(is).at(ip).theta = theta;
+        // }
+        // === end original ===
         // whole batches over the padded arrays (tail lanes replicate the last
         // particle): everything is batched except the four-point gather from
         // the field grid, which stays scalar per lane
@@ -157,6 +193,10 @@ void BeamSolver::advance(double delz, Beam *beam, vector< Field *> *field, Undul
     }
 }
 
+// original: BeamSolver::RungeKutta(double delz) (master 5b34ee6) — identical
+// step sequence; the scalar members gamma/theta/k2gg/k2pp/k3gg/k3pp became
+// batch-valued locals/arguments, and the ODE inputs (btpar, ez, field
+// couplings) moved from class members into explicit parameters.
 void RungeKutta(dbatch &gamma, dbatch &theta, double delz, const dbatch &btpar, const dbatch &ez, const RKParams &prm) {
     // Runge Kutta Solver 4th order - taken from pushp from the old Fortran source
 
@@ -211,6 +251,17 @@ void RungeKutta(dbatch &gamma, dbatch &theta, double delz, const dbatch &btpar, 
 }
 
 
+// === original: BeamSolver::ODE(double tgam, double tthet) (master 5b34ee6) ===
+// double ztemp1 = -2. / xks;
+// complex<double> ctmp = 0;
+// for (int i = 0; i < rpart.size(); i++) {
+//     ctmp += rpart[i] * complex<double>(cos(rharm[i] * tthet), -sin(rharm[i] * tthet));
+// }
+// double btper0 = btpar + ztemp1 * ctmp.real();   //perpendicular velocity
+// double btpar0 = sqrt(1. - btper0 / (tgam * tgam));     //parallel velocity
+// k2pp += xks * (1. - 1. / btpar0) + xku;             //dtheta/dz
+// k2gg += ctmp.imag() / btpar0 / tgam - ez;         //dgamma/dz
+// === end original ===
 void ODE(dbatch &k2gg, dbatch &k2pp, const dbatch &tgam, const dbatch &tthet, const dbatch &btpar, const dbatch &ez, const RKParams &prm) {
 
     // differential equation for longitudinal motion; each lane advances one particle
