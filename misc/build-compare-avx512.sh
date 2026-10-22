@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the three binaries to compare on a Linux AVX-512 machine:
-#   build-master/genesis4   baseline (master)
+#   build-master/genesis4   baseline (the origin/master commit this branch is based on)
 #   build-exact/genesis4    readable-simd, ADI bit-identical to master (default)
 #   build-ulp/genesis4      readable-simd, -DG4_ADI_FAST=ON (last-ulp differences)
 # Usage: misc/build-compare-avx512.sh [extra cmake args, e.g. -DCMAKE_CXX_COMPILER=g++-13]
@@ -15,9 +15,15 @@ build() { # src builddir extra...
     cmake --build "$2" -j "$(nproc)"
 }
 
-# baseline from a detached worktree of master
-[ -d "$ROOT/.claude/worktrees/master-cmp" ] || git -C "$ROOT" worktree add --detach "$ROOT/.claude/worktrees/master-cmp" master
-build "$ROOT/.claude/worktrees/master-cmp" "$ROOT/build-master" "$@"
+# baseline: the upstream commit this branch is based on (a local `master`
+# branch may be stale, and a different shot-noise seeding scheme makes SASE
+# results incomparable)
+git -C "$ROOT" fetch -q origin master
+BASE=$(git -C "$ROOT" merge-base HEAD origin/master)
+WT="$ROOT/.claude/worktrees/master-cmp"
+if [ -d "$WT" ]; then git -C "$WT" checkout -q --detach "$BASE"; else git -C "$ROOT" worktree add -q --detach "$WT" "$BASE"; fi
+echo "baseline: $(git -C "$WT" log -1 --format='%h %s')"
+build "$WT" "$ROOT/build-master" "$@"
 
 build "$ROOT" "$ROOT/build-exact" -DG4_ADI_FAST=OFF "$@"
 build "$ROOT" "$ROOT/build-ulp"   -DG4_ADI_FAST=ON  "$@"
