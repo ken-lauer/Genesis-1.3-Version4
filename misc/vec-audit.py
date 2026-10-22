@@ -2,7 +2,7 @@
 """
 Check that every loop marked G4_SIMD_LOOP / G4_SIMD_LOOP_WITH is vectorized.
 
-    vec-audit.py <build-dir> <source>...
+    vec-audit.py [--verbose] <build-dir> <source>...
 
 Each source is recompiled with the exact command recorded in the build
 directory's compile_commands.json plus the compiler's vectorization remarks
@@ -18,8 +18,10 @@ import shlex
 import subprocess
 import sys
 
-build_dir = sys.argv[1]
-sources = [os.path.abspath(s) for s in sys.argv[2:]]
+args = [a for a in sys.argv[1:] if a != "--verbose"]
+verbose = "--verbose" in sys.argv
+build_dir = args[0]
+sources = [os.path.abspath(s) for s in args[1:]]
 with open(os.path.join(build_dir, "compile_commands.json")) as f:
     commands = {os.path.abspath(e["file"]): e for e in json.load(f)}
 
@@ -41,6 +43,10 @@ for src in sources:
     argv = [a for a in argv if not a.startswith("-MF") and a not in ("-MD", "-MT")]
     argv = [a for i, a in enumerate(argv) if not (i > 0 and argv[i - 1] in ("-MT", "-MF"))]
     result = subprocess.run(argv + remark_flags, cwd=entry["directory"], capture_output=True, text=True)
+    if verbose:
+        print(f"{src}: {compiler_id}, rc={result.returncode}, {len(result.stderr.splitlines())} remark lines")
+        if result.returncode != 0:
+            print(result.stderr[:2000])
     for m in pattern.finditer(result.stderr):
         key = (os.path.basename(m.group(1)), int(m.group(2)))
         text = m.group(3)
@@ -66,8 +72,16 @@ for path in sorted(sources + list(headers)):
     for i, line in enumerate(lines):
         stripped = line.lstrip()
         if "G4_SIMD_LOOP" in stripped and not stripped.startswith(("#", "//", "*")):
-            # clang reports the loop at the pragma line, gcc at the `for` line
-            keys = {(os.path.basename(path), i + 1), (os.path.basename(path), i + 2)}
+            # clang reports the loop at the pragma line, gcc at the `for` line or
+            # at the first statement of the body: accept any line of the loop
+            depth = 0
+            end = i + 1
+            for j in range(i + 1, len(lines)):
+                depth += lines[j].count("{") - lines[j].count("}")
+                if depth <= 0 and "{" in "".join(lines[i + 1:j + 1]):
+                    end = j
+                    break
+            keys = {(os.path.basename(path), line_no) for line_no in range(i + 1, end + 2)}
             checked += 1
             if keys & vectorized:
                 continue
