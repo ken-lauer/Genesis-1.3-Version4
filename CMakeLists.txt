@@ -190,11 +190,11 @@ target_include_directories(genesis13
 # add optional macro definitions
 if (TARGET PkgConfig::FFTW)
     message(STATUS "Defining the macro FFTW in the source code")
-    target_compile_definitions(genesis13 PRIVATE FFTW=1)
+    target_compile_definitions(genesis13 PUBLIC FFTW=1)  # changes class layouts in the headers
 endif()
 
 if(USE_DPI)
-   target_compile_definitions(genesis13 PRIVATE USE_DPI)
+   target_compile_definitions(genesis13 PUBLIC USE_DPI)  # changes class layouts in the headers
 endif()
 
 
