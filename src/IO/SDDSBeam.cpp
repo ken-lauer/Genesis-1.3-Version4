@@ -452,7 +452,6 @@ bool SDDSBeam::init(int inrank, int insize, map<string,string> *arg, Beam *beam,
 
     }
     // mirroring fills by index after resize; both branches rewrite theta
-    beam->beam.at(islice).repad();
 
   }
 

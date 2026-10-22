@@ -4,6 +4,7 @@ project(Genesis_1_3_Version4 CXX C)
 option(USE_DPI "Use diagnostic plugin interface" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # replayed by the vec-audit target
 set(CMAKE_CXX_EXTENTIONS OFF)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_VERBOSE_MAKEFILE OFF)
@@ -73,41 +74,6 @@ else()
         message(STATUS "Excluding FFTW specific source code")
 endif()
 
-
-# Eigen (header-only) for the vectorized solvers, tracker and diagnostics
-find_package(Eigen3 CONFIG QUIET)
-if (TARGET Eigen3::Eigen)
-    message(STATUS "Eigen3 found (config): ${Eigen3_DIR}")
-    link_libraries(Eigen3::Eigen)
-else()
-    find_path(EIGEN3_INCLUDE_DIR Eigen/Core
-              HINTS $ENV{CONDA_PREFIX}/include
-              PATH_SUFFIXES eigen3)
-    if (EIGEN3_INCLUDE_DIR)
-        message(STATUS "Eigen3 found: ${EIGEN3_INCLUDE_DIR}")
-        include_directories(${EIGEN3_INCLUDE_DIR})
-    else()
-        message(FATAL_ERROR "Eigen3 headers not found (tried find_package and CONDA_PREFIX/include/eigen3); install eigen in the build env or pass -DCMAKE_PREFIX_PATH")
-    endif()
-endif()
-# Eigen runtime asserts off outside Debug builds
-add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:EIGEN_NO_DEBUG>)
-
-# xsimd (header-only, >= 8) for the fused sincos kernel in SimdBatch.h
-find_package(xsimd CONFIG QUIET)
-if (TARGET xsimd)
-    message(STATUS "xsimd found (config): ${xsimd_DIR}")
-    link_libraries(xsimd)
-else()
-    find_path(XSIMD_INCLUDE_DIR xsimd/xsimd.hpp
-              HINTS $ENV{CONDA_PREFIX}/include)
-    if (XSIMD_INCLUDE_DIR)
-        message(STATUS "xsimd found: ${XSIMD_INCLUDE_DIR}")
-        include_directories(${XSIMD_INCLUDE_DIR})
-    else()
-        message(FATAL_ERROR "xsimd headers not found (tried find_package and CONDA_PREFIX/include); install xsimd in the build env or pass -DCMAKE_PREFIX_PATH")
-    endif()
-endif()
 
 if(USE_DPI)
    set(SRC_DPI src/Main/RegPlugin.cpp src/Core/DiagnosticHook.cpp src/Core/DiagnosticHookBeam.cpp src/Core/DiagnosticHookLI.cpp)
@@ -234,9 +200,49 @@ endif()
 
 add_dependencies(genesis13 get_git_hash)
 
+# plain-loop SIMD: the particle kernels are auto-vectorized (SimdMath.h)
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-fopenmp-simd HAVE_FOPENMP_SIMD)
+check_cxx_compiler_flag(-fno-math-errno HAVE_FNO_MATH_ERRNO)
+if(HAVE_FOPENMP_SIMD)
+    target_compile_options(genesis13 PUBLIC -fopenmp-simd)
+endif()
+if(HAVE_FNO_MATH_ERRNO)
+    target_compile_options(genesis13 PUBLIC -fno-math-errno)
+endif()
+# The ADI field solver reproduces the original scalar solver bit for bit,
+# which needs unfused multiply-adds and the full complex products. G4_ADI_FAST
+# allows fused multiply-adds and drops the products with the zero real parts
+# of the purely imaginary coefficients: last-ulp differences, fewer instructions.
+option(G4_ADI_FAST "ADI field solver: allow last-ulp differences for speed" OFF)
+if(G4_ADI_FAST)
+    set_source_files_properties(src/Core/FieldSolverADI.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=fast" COMPILE_DEFINITIONS G4_ADI_FAST)
+else()
+    set_source_files_properties(src/Core/FieldSolverADI.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
+# vec-audit: recompile the files with marked SIMD loops with the compiler's
+# vectorization remarks and fail if a marked loop stayed scalar
+add_custom_target(vec-audit
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/misc/vec-audit.py ${CMAKE_BINARY_DIR}
+        ${CMAKE_SOURCE_DIR}/src/Core/BeamSolver.cpp
+        ${CMAKE_SOURCE_DIR}/src/Core/TrackBeam.cpp
+        ${CMAKE_SOURCE_DIR}/src/Core/Field.cpp
+        ${CMAKE_SOURCE_DIR}/src/Core/Diagnostic.cpp
+        ${CMAKE_SOURCE_DIR}/src/Core/DiagnosticUser.cpp
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    VERBATIM)
+
 add_executable(genesis4 src/Main/mainwrap.cpp)
 
 target_link_libraries(genesis4 genesis13 stdc++ ${_libraries})
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(lanes_equivalence test/lanes_equivalence.cpp)
+    target_link_libraries(lanes_equivalence genesis13 stdc++ ${_libraries})
+    add_test(NAME lanes_equivalence COMMAND lanes_equivalence)
+endif()
 
 
 # Compilation of plugin testbench only when plugin system is requested

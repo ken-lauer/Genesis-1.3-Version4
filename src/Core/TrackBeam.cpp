@@ -1,6 +1,6 @@
 #include "TrackBeam.h"
 #include "Beam.h"
-#include "SimdBatch.h"
+#include "SimdMath.h"
 
 enum class QuadMode { Drift, Focus, Defocus };
 
@@ -12,10 +12,10 @@ inline QuadMode quadMode(double q)
     return q > 0 ? QuadMode::Focus : QuadMode::Defocus;
 }
 
-// transverse transport through one step, defined below track(); each lane
-// advances one particle
-void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px,
-               const dbatch &gammaz, double dx);
+// transverse transport of one plane through one step, over the particles of a
+// slice; defined below track()
+static void applyQuad(QuadMode mode, int np, double delz, double qf, double *x, double *px,
+                      const double *gammaz, double dx);
 
 TrackBeam::TrackBeam(){}
 TrackBeam::~TrackBeam(){}
@@ -56,128 +56,71 @@ void TrackBeam::track(double delz, Beam *beam,Undulator *und,bool lastStep=true)
     if (angle!=0) { this->applyChicane(beam,angle,lb,ld,lt,gamma0); }
   }
   // handle the different cases (drift, focusing and defocusing)
-  // === original: TrackBeam::track (master 5b34ee6) — selection via member
-  // function pointers ApplyX/ApplyY, replaced by the QuadMode enum ===
-  // if (qx==0){
-  //   this->ApplyX=&TrackBeam::applyDrift;
-  // }else{
-  //   xoff=xoff/qx;
-  //   if (qx>0){
-  //     this->ApplyX=&TrackBeam::applyFQuad;
-  //   } else {
-  //     this->ApplyX=&TrackBeam::applyDQuad;
-  //   }
-  // }
-  // (same for qy/yoff/ApplyY)
-  // === end original ===
   if (qx!=0){ xoff=xoff/qx; }
   if (qy!=0){ yoff=yoff/qy; }
   const QuadMode modeX = quadMode(qx);
   const QuadMode modeY = quadMode(qy);
 
-  // === original: TrackBeam::track per-particle loop (master 5b34ee6) ===
-  // for (int i=0; i<beam->beam.size();i++){
-  //   for (int j=0; j<beam->beam.at(i).size();j++){
-  //     Particle *p=&beam->beam.at(i).at(j);
-  //     double gammaz=sqrt(p->gamma*p->gamma-1- aw*aw - p->px*p->px - p->py*p->py); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
-  //     (this->*ApplyX)(delz,qx,&(p->x),&(p->px),gammaz,xoff);
-  //     (this->*ApplyY)(delz,qy,&(p->y),&(p->py),gammaz,yoff);
-  //   }
-  // }
-  // === end original ===
-  for (int i=0; i<beam->beam.size();i++){
-    auto &slice = beam->beam.at(i);
-    double *x_s = slice.x();
-    double *px_s = slice.px();
-    double *y_s = slice.y();
-    double *py_s = slice.py();
-    const double *g_s = slice.gamma();
+  for (auto &slice : beam->beam){
     const int np = static_cast<int>(slice.size());
-    // whole batches over the padded arrays; tail lanes replicate the last particle
-    for (int j = 0; j < np; j += dbatch_width) {
-      dbatch x = dbatch::MapAligned(x_s + j);
-      dbatch px = dbatch::MapAligned(px_s + j);
-      dbatch y = dbatch::MapAligned(y_s + j);
-      dbatch py = dbatch::MapAligned(py_s + j);
-      const dbatch g = dbatch::MapAligned(g_s + j);
-      const dbatch gammaz = (g * g - 1. - aw * aw - px * px - py * py).sqrt(); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
+    gammaz.resize(np);
+    const double *g = slice.gamma();
+    const double *px = slice.px();
+    const double *py = slice.py();
+    double *gz = gammaz.data();
+    G4_SIMD_LOOP
+    for (int j = 0; j < np; j++){
+      gz[j] = sqrt(g[j]*g[j]-1- aw*aw - px[j]*px[j] - py[j]*py[j]); // = gamma*betaz=gamma*(1-(1+aw*aw)/gamma^2);
+    }
 #ifdef G4_DBGDIAG
 // G4_DBGDIAG: add test against negative radicand? Note that the particles probably already made lots of noise elsewhere.
 #endif
-      applyQuad(modeX, delz, qx, x, px, gammaz, xoff);
-      applyQuad(modeY, delz, qy, y, py, gammaz, yoff);
-      dbatch::MapAligned(x_s + j) = x;
-      dbatch::MapAligned(px_s + j) = px;
-      dbatch::MapAligned(y_s + j) = y;
-      dbatch::MapAligned(py_s + j) = py;
-    }
+    applyQuad(modeX, np, delz, qx, slice.x(), slice.px(), gz, xoff);
+    applyQuad(modeY, np, delz, qy, slice.y(), slice.py(), gz, yoff);
   }
-
-
 
   return;
 } 
 
 
-// the mode is uniform for all particles of a step, so the per-particle math
-// is branch-free
-//
-// === original: three separate scalar routines (master 5b34ee6) ===
-// void TrackBeam::applyDrift(double delz, double qf, double *x, double *px, double gammaz, double dx)
-// {
-//   *x+=(*px)*delz/gammaz;
-// }
-//
-// void TrackBeam::applyFQuad(double delz, double qf, double *x, double *px, double gammaz, double dx)
-// {
-//   double foc=sqrt(qf/gammaz);
-//   double omg=foc*delz;
-//   double a1=cos(omg);
-//   double a2=sin(omg)/foc;
-//   double a3=-a2*foc*foc;
-//   double xtmp=*x-dx;
-//   *x =a1*xtmp+a2*(*px)/gammaz+dx;
-//   *px=a3*xtmp*gammaz+a1*(*px);
-// }
-//
-// void TrackBeam::applyDQuad(double delz, double qf, double *x, double *px, double gammaz, double dx)
-// {
-//   double foc=sqrt(-qf/gammaz);
-//   double omg=foc*delz;
-//   double a1=cosh(omg);
-//   double a2=sinh(omg)/foc;
-//   double a3=a2*foc*foc;
-//   double xtmp=*x-dx;
-//   *x =a1*xtmp+a2*(*px)/gammaz+dx;
-//   *px=a3*xtmp*gammaz+a1*(*px);
-// }
-// === end original ===
-void applyQuad(QuadMode mode, double delz, double qf, dbatch &x, dbatch &px, const dbatch &gammaz, double dx)
+// the mode is uniform for all particles of a step, so each case is one loop
+// over the slice; drift and focusing vectorize, defocusing stays scalar
+// (cosh/sinh are libm calls and defocusing quads are a few steps per cell)
+static void applyQuad(QuadMode mode, int np, double delz, double qf, double *__restrict x,
+                      double *__restrict px, const double *__restrict gammaz, double dx)
 {
   if (mode == QuadMode::Drift){
-    x+=px*delz/gammaz;
+    G4_SIMD_LOOP
+    for (int j = 0; j < np; j++){
+      x[j]+=px[j]*delz/gammaz[j];
+    }
     return;
   }
   if (mode == QuadMode::Focus){
-    dbatch foc=(qf/gammaz).sqrt();
-    dbatch omg=foc*delz;
-    dbatch s1, a1;
-    sincos(omg, s1, a1);
-    dbatch a2=s1/foc;
-    dbatch a3=-a2*foc*foc;
-    dbatch xtmp=x-dx;
-    x =a1*xtmp+a2*px/gammaz+dx;
-    px=a3*xtmp*gammaz+a1*px;
+    G4_SIMD_LOOP
+    for (int j = 0; j < np; j++){
+      double foc=sqrt(qf/gammaz[j]);
+      double omg=foc*delz;
+      double a1, s1;
+      sincos_poly(omg, s1, a1);
+      double a2=s1/foc;
+      double a3=-a2*foc*foc;
+      double xtmp=x[j]-dx;
+      x[j] =a1*xtmp+a2*px[j]/gammaz[j]+dx;
+      px[j]=a3*xtmp*gammaz[j]+a1*px[j];
+    }
     return;
   }
-  dbatch foc=(-qf/gammaz).sqrt();
-  dbatch omg=foc*delz;
-  dbatch a1=omg.cosh();
-  dbatch a2=omg.sinh()/foc;
-  dbatch a3=a2*foc*foc;
-  dbatch xtmp=x-dx;
-  x =a1*xtmp+a2*px/gammaz+dx;
-  px=a3*xtmp*gammaz+a1*px;
+  for (int j = 0; j < np; j++){
+    double foc=sqrt(-qf/gammaz[j]);
+    double omg=foc*delz;
+    double a1=cosh(omg);
+    double a2=sinh(omg)/foc;
+    double a3=a2*foc*foc;
+    double xtmp=x[j]-dx;
+    x[j] =a1*xtmp+a2*px[j]/gammaz[j]+dx;
+    px[j]=a3*xtmp*gammaz[j]+a1*px[j];
+  }
 }
 
 void TrackBeam::applyCorrector(Beam *beam, double cx, double cy)

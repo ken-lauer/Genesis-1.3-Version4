@@ -1,0 +1,10 @@
+# Linux x86-64 build environment mirroring the GitHub CI (Ubuntu, GCC, OpenMPI),
+# used to compile genesis4 for AVX-512 and audit the vectorized loops:
+#   misc/docker/vec-audit-avx512.sh
+FROM --platform=linux/amd64 ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config cmake git python3 binutils \
+        libfftw3-mpi-dev libhdf5-openmpi-dev libopenmpi-dev openmpi-bin \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build

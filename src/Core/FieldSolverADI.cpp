@@ -1,68 +1,35 @@
 #include "FieldSolverADI.h"
 #include "Field.h"
 #include "Beam.h"
-#include "SimdBatch.h"
+#include "SimdMath.h"
 
+#include <algorithm>
+
+// The ADI step is bit-identical to the original scalar solver: every
+// expression keeps its operation order, and complex products are spelled out
+// in cmul so neither the NaN-recovery path of std::complex operator* nor FMA
+// contraction (off for this file, see CMakeLists.txt) changes a rounding.
+// G4_ADI_FAST trades that for fused multiply-adds and shorter products.
 namespace {
 
-// Contiguous complex spans: one Eigen expression per grid region replaces the
-// hand-written batch loop + scalar remainder pairs (Eigen vectorizes the body
-// and handles the tail itself).
-using cspan = Eigen::Map<Eigen::ArrayXcd>;
-using ccspan = Eigen::Map<const Eigen::ArrayXcd>;
-
-// Full forward/backward tridiagonal recurrence for B row-blocks
-// (B * cbatch_width rows) starting at `row`. The recurrence runs along the
-// contiguous (x) dimension, so lanes hold cbatch_width independent rows
-// instead; the recurrence values stay in registers across k. B > 1 advances
-// several row-blocks together so their serial mul-add chains overlap
-// (single-chain throughput is latency-bound).
-//
-// The gather/scatter bounce through the aligned lane buffer is deliberate: a
-// strided Eigen Map has no packet access, which would drop every complex
-// multiply onto the (much slower) scalar std::complex path.
-template <int B>
-void tridagxRows(complex<double> *up, const complex<double> *rp,
-                 const vector<complex<double>> &c, const vector<complex<double>> &cbet,
-                 const vector<complex<double>> &cwet, int n, int row)
+inline complex<double> cmul(const complex<double> &a, const complex<double> &b)
 {
-    alignas(64) complex<double> lane[cbatch_width];
-    auto gather = [&](const complex<double> *p, int base, int k) -> cbatch {
-        for (int l = 0; l < cbatch_width; l++) {
-            lane[l] = p[base + l * n + k];
-        }
-        return cbatch::MapAligned(lane);
-    };
-    auto scatter = [&](const cbatch &b, int base, int k) {
-        cbatch::MapAligned(lane) = b;
-        for (int l = 0; l < cbatch_width; l++) {
-            up[base + l * n + k] = lane[l];
-        }
-    };
+    return {a.real() * b.real() - a.imag() * b.imag(),
+            a.real() * b.imag() + a.imag() * b.real()};
+}
 
-    int base[B];
-    cbatch uk[B];
-    for (int b = 0; b < B; b++) {
-        base[b] = (row + b * cbatch_width) * n;
-        uk[b] = gather(rp, base[b], 0) * cbet[0];
-        scatter(uk[b], base[b], 0);
-    }
-    for (int k = 1; k < n; k++) {
-        for (int b = 0; b < B; b++) {
-            uk[b] = (gather(rp, base[b], k) - c[k] * uk[b]) * cbet[k];
-            scatter(uk[b], base[b], k);
-        }
-    }
-    for (int k = n - 2; k >= 0; k--) {
-        for (int b = 0; b < B; b++) {
-            uk[b] = gather(up, base[b], k) - cwet[k + 1] * uk[b];
-            scatter(uk[b], base[b], k);
-        }
-    }
+// product with a purely imaginary coefficient (cstep, c[k]); the full product
+// keeps the zero real part's terms so the rounding matches the original
+inline complex<double> cmul_imag(const complex<double> &a, const complex<double> &b)
+{
+#ifdef G4_ADI_FAST
+    return {-a.imag() * b.imag(), a.imag() * b.real()};
+#else
+    return cmul(a, b);
+#endif
 }
 
 } // namespace
-
 
 FieldSolverADI::~FieldSolverADI() = default;
 
@@ -78,147 +45,131 @@ void FieldSolverADI::advance(double delz, Field *field, Beam *beam, Undulator *u
 }
 
 
-void FieldSolverADI::ADI(vector<complex<double> > &crfield)
-{
-  const int n = static_cast<int>(ngrid);
-  const complex<double> *fld = crfield.data();
-  const complex<double> *src = crsource.data();
-  complex<double> *rp = r.data();
-
-  // r = source + field + cstep*(neighbors - field - field); boundary
-  // rows/columns see only their single existing neighbor. The doubled field
-  // term is spelled -F-F rather than -2.0*F: a double*complex node has no
-  // Eigen packet support ("TODO vectorize mixed product") and would drop the
-  // whole expression onto the scalar std::complex path.
-  auto F = [&](int off, int len) { return ccspan(fld + off, len); };
-  auto S = [&](int off, int len) { return ccspan(src + off, len); };
-
-  // === original: FieldSolverADI::ADI, implicit direction in x (master 5b34ee6) ===
-  // for (idx=0;idx<ngrid;idx++){
-  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]);
-  // }
-  // for (idx=ngrid;idx<ngrid*(ngrid-1);idx++){
-  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+ngrid]-2.0*crfield[idx]+crfield[idx-ngrid]);
-  // }
-  // for (idx=ngrid*(ngrid-1);idx<ngrid*ngrid;idx++){
-  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-ngrid]-2.0*crfield[idx]);
-  // }
-  // === end original ===
-  // implicit direction in x: neighbors live at +-ngrid, so the first row, the
-  // contiguous interior and the last row are one span each
-  const int mid = n * (n - 2);
-  const int lastrow = n * (n - 1);
-  cspan(rp, n) = S(0, n) + F(0, n) + cstep * (F(n, n) - F(0, n) - F(0, n));
-  cspan(rp + n, mid) = S(n, mid) + F(n, mid) +
-                       cstep * (F(2 * n, mid) + F(0, mid) - F(n, mid) - F(n, mid));
-  cspan(rp + lastrow, n) = S(lastrow, n) + F(lastrow, n) +
-                           cstep * (F(lastrow - n, n) - F(lastrow, n) - F(lastrow, n));
-
-  // solve tridiagonal system in x
-  this->tridagx(crfield);
-
-  // === original: FieldSolverADI::ADI, implicit direction in y (master 5b34ee6) ===
-  // for(ix=0;ix<ngrid*ngrid;ix+=ngrid){
-  //   idx=ix;
-  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]);
-  //   for(idx=ix+1;idx<ix+ngrid-1;idx++){
-  //     r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx+1]-2.0*crfield[idx]+crfield[idx-1]);
-  //   }
-  //   idx=ix+ngrid-1;
-  //   r[idx]=crsource[idx]+crfield[idx]+cstep*(crfield[idx-1]-2.0*crfield[idx]);
-  // }
-  // === end original ===
-  // implicit direction in y: neighbors live at +-1 within each contiguous row
-  for (int ix = 0; ix < n * n; ix += n) {
-    rp[ix] = src[ix] + fld[ix] + cstep * (fld[ix + 1] - 2.0 * fld[ix]);
-    cspan(rp + ix + 1, n - 2) =
-        S(ix + 1, n - 2) + F(ix + 1, n - 2) +
-        cstep * (F(ix + 2, n - 2) + F(ix, n - 2) - F(ix + 1, n - 2) - F(ix + 1, n - 2));
-    const int last = ix + n - 1;
-    rp[last] = src[last] + fld[last] + cstep * (fld[last - 1] - 2.0 * fld[last]);
-  }
-
-  // solve tridiagonal system in y
-  this->tridagy(crfield);
-
-}
-
-
-// === original: FieldSolverADI::tridagx (master 5b34ee6) — the scalar tail
-// loop below is this code verbatim; tridagxRows runs the same recurrence on
-// cbatch_width rows per lane ===
-// for (int i = 0; i < ngrid * ngrid; i += ngrid) {
-//     u[i] = r[i] * cbet[0];
-//     for (int k = 1; k < ngrid; k++) {
-//         u[k + i] = (r[k + i] - c[k] * u[k + i - 1]) * cbet[k];
-//     }
-//     for (int k = ngrid - 2; k >= 0; k--) {
-//         u[k + i] -= cwet[k + 1] * u[k + i + 1];
-//     }
-// }
-// === end original ===
-void FieldSolverADI::tridagx(vector<complex<double > > &u) {
-    const int n = static_cast<int>(ngrid);
-    complex<double> *up = u.data();
-    const complex<double> *rp = r.data();
-
-    int row = 0;
-    for (; row + 2 * cbatch_width <= n; row += 2 * cbatch_width) {
-        tridagxRows<2>(up, rp, c, cbet, cwet, n, row);
-    }
-    for (; row + cbatch_width <= n; row += cbatch_width) {
-        tridagxRows<1>(up, rp, c, cbet, cwet, n, row);
-    }
-    // scalar tail: fewer rows than one batch. The backward sweep updates u in
-    // place, so re-running an overlapping block would be wrong - this stays.
-    for (; row < n; row++) {
-        const int i = row * n;
-        up[i] = rp[i] * cbet[0];
-        for (int k = 1; k < n; k++) {
-            up[k + i] = (rp[k + i] - c[k] * up[k + i - 1]) * cbet[k];
-        }
-        for (int k = n - 2; k >= 0; k--) {
-            up[k + i] -= cwet[k + 1] * up[k + i + 1];
-        }
-    }
-}
-
-// The recurrences run across rows (k), so each whole-row sweep is an
-// independent cwise expression.
+// x-implicit half-step. The explicit stencil couples neighbouring rows
+// (+-n) and is evaluated row by row; the tridiagonal solve runs along x,
+// i.e. along each row, so the rows are taken in blocks of `lanes`, transposed
+// into an L1-resident buffer where the recurrence advances all rows of the
+// block together in contiguous memory, and written back.
 //
-// === original: FieldSolverADI::tridagy (master 5b34ee6) ===
-// for (int i = 0; i < ngrid; i++) {
-//     u[i] = r[i] * cbet[0];
-// }
-// for (int k = 1; k < ngrid; k++) {
-//     int n = k * ngrid;
-//     for (int i = 0; i < ngrid; i++) {
-//         u[n + i] = (r[n + i] - c[k] * u[n + i - ngrid]) * cbet[k];
-//     }
-// }
-// for (int k = ngrid - 2; k >= 0; k--) {
-//     int n = k * ngrid;
-//     for (int i = 0; i < ngrid; i++) {
-//         u[n + i] -= cwet[k + 1] * u[n + i + ngrid];
-//     }
-// }
-// === end original ===
-void FieldSolverADI::tridagy(vector<complex<double > > &u) {
+//   r_k[i] = S_k[i] + U_k[i] + cstep*((U_{k+1}[i] - 2 U_k[i]) + U_{k-1}[i])   (one neighbour at the edges)
+//   u[0] = r[0] * cbet_0,  u[i] = (r[i] - c_i * u[i-1]) * cbet_i             forward along the row
+//   u[i] -= cwet_{i+1} * u[i+1]                                               backward along the row
+void FieldSolverADI::halfStepX(const complex<double> *__restrict src, complex<double> *__restrict u)
+{
     const int n = static_cast<int>(ngrid);
-    complex<double> *up = u.data();
-    const complex<double> *rp = r.data();
+    constexpr int L = lanes;
+    complex<double> *__restrict rb = rowbuf.data();    // stencil of the block's rows, L x n
+    complex<double> *__restrict T = laneT.data();      // the block transposed, n x L
+    complex<double> *__restrict prev = prevrow.data(); // field of the row above the block, before it was overwritten
 
-    cspan(up, n) = ccspan(rp, n) * cbet[0];
-    for (int k = 1; k < n; k++) {
-        const int off = k * n;
-        cspan(up + off, n) = (ccspan(rp + off, n) - c[k] * ccspan(up + off - n, n)) * cbet[k];
+    for (int row0 = 0; row0 < n; row0 += L) {
+        const int nl = std::min(L, n - row0);
+        for (int b = 0; b < nl; b++) {
+            const int k = row0 + b;
+            const complex<double> *S = src + k * n;
+            const complex<double> *U = u + k * n;
+            const complex<double> *Um = (b == 0) ? prev : U - n;
+            const complex<double> *Up = U + n;
+            complex<double> *r = rb + b * n;
+            if (k == 0) {
+                for (int i = 0; i < n; i++) {
+                    r[i] = S[i] + U[i] + cmul_imag(cstep, Up[i] - 2.0 * U[i]);
+                }
+            } else if (k == n - 1) {
+                for (int i = 0; i < n; i++) {
+                    r[i] = S[i] + U[i] + cmul_imag(cstep, Um[i] - 2.0 * U[i]);
+                }
+            } else {
+                for (int i = 0; i < n; i++) {
+                    r[i] = S[i] + U[i] + cmul_imag(cstep, Up[i] - 2.0 * U[i] + Um[i]);
+                }
+            }
+        }
+        // the next block needs this block's last row as it is now
+        std::copy(u + (row0 + nl - 1) * n, u + (row0 + nl) * n, prev);
+        // forward and backward sweeps along the rows, the block's rows
+        // advancing together: lane b is row row0+b, and the running value of
+        // each lane stays in a small contiguous array
+        complex<double> *ub = u + row0 * n;
+        complex<double> cur[L];
+        G4_SIMD_LOOP
+        for (int b = 0; b < nl; b++) {
+            const complex<double> v = cmul(rb[b * n], cbet[0]);
+            cur[b] = v;
+            ub[b * n] = v;
+        }
+        for (int i = 1; i < n; i++) {
+            const complex<double> ci = c[i];
+            const complex<double> bi = cbet[i];
+            G4_SIMD_LOOP
+            for (int b = 0; b < nl; b++) {
+                const complex<double> v = cmul(rb[b * n + i] - cmul_imag(ci, cur[b]), bi);
+                cur[b] = v;
+                ub[b * n + i] = v;
+            }
+        }
+        for (int i = n - 2; i >= 0; i--) {
+            const complex<double> wi = cwet[i + 1];
+            G4_SIMD_LOOP
+            for (int b = 0; b < nl; b++) {
+                const complex<double> v = ub[b * n + i] - cmul(wi, cur[b]);
+                cur[b] = v;
+                ub[b * n + i] = v;
+            }
+        }
+    }
+}
+
+// y-implicit half-step: the explicit stencil along each row (neighbours at
+// +-1), the tridiagonal solve across the rows. Row k is read into the row
+// buffer before it is overwritten, so the forward sweep runs in the same pass
+// as the stencil; every inner loop is over a contiguous row.
+//
+//   r_k[i] = S_k[i] + U_k[i] + cstep*((U_k[i+1] - 2 U_k[i]) + U_k[i-1])   (one neighbour at the edges)
+//   u_0 = r_0 * cbet_0,   u_k = (r_k - c_k * u_{k-1}) * cbet_k            forward,  k = 1..n-1
+//   u_k -= cwet_{k+1} * u_{k+1}                                           backward, k = n-2..0
+void FieldSolverADI::halfStepY(const complex<double> *__restrict src, complex<double> *__restrict u)
+{
+    const int n = static_cast<int>(ngrid);
+    complex<double> *__restrict r = rowbuf.data();
+
+    for (int k = 0; k < n; k++) {
+        const complex<double> *S = src + k * n;
+        const complex<double> *U = u + k * n;
+        r[0] = S[0] + U[0] + cmul_imag(cstep, U[1] - 2.0 * U[0]);
+        for (int i = 1; i < n - 1; i++) {
+            r[i] = S[i] + U[i] + cmul_imag(cstep, U[i + 1] - 2.0 * U[i] + U[i - 1]);
+        }
+        r[n - 1] = S[n - 1] + U[n - 1] + cmul_imag(cstep, U[n - 2] - 2.0 * U[n - 1]);
+        complex<double> *uk = u + k * n;
+        if (k == 0) {
+            for (int i = 0; i < n; i++) {
+                uk[i] = cmul(r[i], cbet[0]);
+            }
+        } else {
+            const complex<double> *um = uk - n;
+            const complex<double> ck = c[k];
+            const complex<double> bk = cbet[k];
+            for (int i = 0; i < n; i++) {
+                uk[i] = cmul(r[i] - cmul_imag(ck, um[i]), bk);
+            }
+        }
     }
     for (int k = n - 2; k >= 0; k--) {
-        const int off = k * n;
-        cspan(up + off, n) -= cwet[k + 1] * ccspan(up + off + n, n);
+        complex<double> *uk = u + k * n;
+        const complex<double> *up = uk + n;
+        const complex<double> wk = cwet[k + 1];
+        for (int i = 0; i < n; i++) {
+            uk[i] -= cmul(wk, up[i]);
+        }
     }
 }
 
+void FieldSolverADI::ADI(vector<complex<double>> &crfield)
+{
+    halfStepX(crsource.data(), crfield.data());
+    halfStepY(crsource.data(), crfield.data());
+}
 
 void FieldSolverADI::init(double delz,double dgrid, double xks, unsigned int ngrid_in) {
 
@@ -239,10 +190,12 @@ void FieldSolverADI::init(double delz,double dgrid, double xks, unsigned int ngr
     auto *cwrk2 = new complex<double>[ngrid];
     if (c.size() != ngrid) {
         c.resize(ngrid);
-        r.resize(ngrid * ngrid);
         cbet.resize(ngrid);
         cwet.resize(ngrid);
         crsource.resize(ngrid * ngrid);
+        rowbuf.resize(static_cast<size_t>(lanes) * ngrid);
+        laneT.assign(static_cast<size_t>(lanes) * ngrid, 0.);  // unused lanes of a partial block stay finite
+        prevrow.resize(ngrid);
     }
 
     mupp[0] = rtmp;

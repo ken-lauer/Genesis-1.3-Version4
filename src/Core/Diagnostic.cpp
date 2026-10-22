@@ -11,7 +11,7 @@
 #include "Output.h"
 #include "Setup.h"
 
-#include "SimdBatch.h"
+#include "SimdMath.h"
 
 Diagnostic::Diagnostic()
 {
@@ -414,77 +414,59 @@ void DiagBeam::getValues(Beam *beam,std::map<std::string,std::vector<double> >&v
         for (int iharm = 0; iharm < nharm; iharm++) {
             b[iharm] = 0;
         }
-        // === original: DiagBeam::getValues particle loop (master 5b34ee6) —
-        // moments and bunching phasors accumulated in one pass ===
-        // for (auto const &par: slice) {
-        //     x1 += par.x;
-        //     x2 += par.x * par.x;
-        //     y1 += par.y;
-        //     y2 += par.y * par.y;
-        //     g1 += par.gamma;
-        //     g2 += par.gamma * par.gamma;
-        //     px1 += par.px;
-        //     py1 += par.py;
-        //     px2 += par.px * par.px;
-        //     py2 += par.py * par.py;
-        //     xpx += par.x * par.px;
-        //     ypy += par.y * par.py;
-        //     for (int iharm = 0; iharm < nharm; iharm++) {
-        //         b[iharm] += complex<double>(cos((iharm + 1) * par.theta), sin((iharm + 1) * par.theta));
-        //     }
-        // }
-        // === end original ===
-        // beam moments, batched over particles
-        {
-            const double *x_s = slice.x();
-            const double *y_s = slice.y();
-            const double *px_s = slice.px();
-            const double *py_s = slice.py();
-            const double *g_s = slice.gamma();
-            const auto sums = batch_sum<12>(static_cast<int>(slice.size()),
-                                            [&](int ip) -> std::array<dbatch, 12> {
-                const dbatch x = dbatch::MapAligned(x_s + ip);
-                const dbatch y = dbatch::MapAligned(y_s + ip);
-                const dbatch px = dbatch::MapAligned(px_s + ip);
-                const dbatch py = dbatch::MapAligned(py_s + ip);
-                const dbatch g = dbatch::MapAligned(g_s + ip);
-                return {x, x * x, y, y * y, g, g * g,
-                        px, py, px * px, py * py, x * px, y * py};
-            });
-            x1 = sums[0]; x2 = sums[1];
-            y1 = sums[2]; y2 = sums[3];
-            g1 = sums[4]; g2 = sums[5];
-            px1 = sums[6]; py1 = sums[7];
-            px2 = sums[8]; py2 = sums[9];
-            xpx = sums[10]; ypy = sums[11];
+        const double *x_s = slice.x();
+        const double *y_s = slice.y();
+        const double *px_s = slice.px();
+        const double *py_s = slice.py();
+        const double *g_s = slice.gamma();
+        const double *th_s = slice.theta();
+        const int np = static_cast<int>(slice.size());
+        // beam moments, two passes so the accumulators fit the vector registers
+        G4_SIMD_LOOP_WITH(reduction(+:x1,x2,y1,y2,g1,g2))
+        for (int ip = 0; ip < np; ip++) {
+            x1 += x_s[ip];
+            x2 += x_s[ip] * x_s[ip];
+            y1 += y_s[ip];
+            y2 += y_s[ip] * y_s[ip];
+            g1 += g_s[ip];
+            g2 += g_s[ip] * g_s[ip];
         }
-        // bunching phasors, batched over particles, one pass per harmonic so
-        // the accumulators stay in batch registers
-        {
-            const double *th_s = slice.theta();
-            const int np = static_cast<int>(slice.size());
-            for (int iharm = 0; iharm < nharm; iharm++) {
-                const double h = static_cast<double>(iharm + 1);
-                const auto [re, im] = batch_sum<2>(np, [&](int ip) -> std::array<dbatch, 2> {
-                    dbatch s, c;
-                    sincos(h * dbatch::MapAligned(th_s + ip), s, c);
-                    return {c, s};
-                });
-                b[iharm] += complex<double>(re, im);
+        G4_SIMD_LOOP_WITH(reduction(+:px1,py1,px2,py2,xpx,ypy))
+        for (int ip = 0; ip < np; ip++) {
+            px1 += px_s[ip];
+            py1 += py_s[ip];
+            px2 += px_s[ip] * px_s[ip];
+            py2 += py_s[ip] * py_s[ip];
+            xpx += x_s[ip] * px_s[ip];
+            ypy += y_s[ip] * py_s[ip];
+        }
+        // bunching phasors, one pass per harmonic
+        for (int iharm = 0; iharm < nharm; iharm++) {
+            const double h = static_cast<double>(iharm + 1);
+            double bre = 0, bim = 0;
+            G4_SIMD_LOOP_WITH(reduction(+:bre,bim))
+            for (int ip = 0; ip < np; ip++) {
+                double s, c;
+                sincos_poly(h * th_s[ip], s, c);
+                bre += c;
+                bim += s;
             }
+            b[iharm] += complex<double>(bre, bim);
         }
         if (filter["aux"]) {
-            for (auto const &par: slice) {
-                if (par.x < xmin) { xmin = par.x; }
-                if (par.x > xmax) { xmax = par.x; }
-                if (par.px < pxmin) { pxmin = par.px; }
-                if (par.px > pxmax) { pxmax = par.px; }
-                if (par.y < ymin) { ymin = par.y; }
-                if (par.y > ymax) { ymax = par.y; }
-                if (par.py < pymin) { pymin = par.py; }
-                if (par.py > pymax) { pymax = par.py; }
-                if (par.gamma < gmin) { gmin = par.gamma; }
-                if (par.gamma > gmax) { gmax = par.gamma; }
+            // ten floating-point min/max reductions: clang declines to vectorize
+            // this loop, and it is cheap enough to stay scalar
+            for (int ip = 0; ip < np; ip++) {
+                xmin = std::fmin(xmin, x_s[ip]);
+                xmax = std::fmax(xmax, x_s[ip]);
+                pxmin = std::fmin(pxmin, px_s[ip]);
+                pxmax = std::fmax(pxmax, px_s[ip]);
+                ymin = std::fmin(ymin, y_s[ip]);
+                ymax = std::fmax(ymax, y_s[ip]);
+                pymin = std::fmin(pymin, py_s[ip]);
+                pymax = std::fmax(pymax, py_s[ip]);
+                gmin = std::fmin(gmin, g_s[ip]);
+                gmax = std::fmax(gmax, g_s[ip]);
             }
         }
         double norm = 1.;
@@ -795,73 +777,39 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
     // Row moment weights with each dx duplicated into (dx, dx) pairs: viewing
     // a complex row as 2*ngrid doubles, |c|^2 * dx = re^2*dx + im^2*dx, so the
     // weighted moments reduce to pure double multiply-sums over the raw
-    // interleaved storage - no per-element complex norm (which Eigen cannot
-    // vectorize) and no de-interleaving.
-    Eigen::ArrayXd dxv(2 * ngrid);
+    // interleaved storage, with no per-element complex norm and no
+    // de-interleaving.
+    std::vector<double> dxv(2 * ngrid);
     for (int ix = 0; ix < ngrid; ix++) {
-        dxv(2 * ix) = static_cast<double>(ix) + shift;
-        dxv(2 * ix + 1) = dxv(2 * ix);
+        dxv[2 * ix] = static_cast<double>(ix) + shift;
+        dxv[2 * ix + 1] = dxv[2 * ix];
     }
-    const Eigen::ArrayXd dx2v = dxv.square();
+    std::vector<double> dx2v(2 * ngrid);
+    for (int k = 0; k < 2 * ngrid; k++) { dx2v[k] = dxv[k] * dxv[k]; }
 
-    // === original: DiagField::getValues grid loop (master 5b34ee6) — one
-    // scalar pass per slice, replaced by the seg_moments row passes below ===
-    // for (int iy = 0; iy < ngrid; iy++) {
-    //     double dy = static_cast<double>(iy) + shift;
-    //     for (int ix = 0; ix < ngrid; ix++) {
-    //         double dx = static_cast<double>(ix) + shift;
-    //         int i = iy * ngrid + ix;
-    //         loc = slice.at(i);
-    // #ifdef FFTW
-    //         in[i]=loc;   // field for the FFT
-    // #endif
-    //         double wei = loc.real() * loc.real() + loc.imag() * loc.imag();
-    //         ff += loc;
-    //         power += wei;
-    //         x1 += dx * wei;
-    //         x2 += dx * dx * wei;
-    //         y1 += dy * wei;
-    //         y2 += dy * dy * wei;
-    //     }
-    // }
-    // === end original ===
-    // Single fused pass over one interleaved row segment, accumulators in
-    // registers: power and x-moments of |c|^2, plus (optionally) the plain
-    // field sum recovered from the even/odd lanes of a batch accumulator.
-    // `w`/`w2` are the duplicated weights aligned with v's dx positions.
-    auto seg_moments = [](const double *v, const double *w, const double *w2, int len,
+    // One pass over one interleaved row segment: power and x-moments of |c|^2,
+    // plus (optionally) the plain field sum recovered from the even/odd
+    // entries. `w`/`w2` are the duplicated weights aligned with v's dx positions.
+    auto seg_moments = [](const double *__restrict v, const double *__restrict w,
+                          const double *__restrict w2, int len,
                           double &pow_, double &x1_, double &x2_, complex<double> *fsum) {
-        dbatch accp = dbatch::Zero();
-        dbatch acc1 = dbatch::Zero();
-        dbatch acc2 = dbatch::Zero();
-        dbatch accf = dbatch::Zero();
-        int k = 0;
-        for (; k + dbatch_width <= len; k += dbatch_width) {
-            const dbatch vv = dbatch::Map(v + k);
-            const dbatch sq = vv * vv;
-            accp += sq;
-            acc1 += sq * dbatch::Map(w + k);
-            acc2 += sq * dbatch::Map(w2 + k);
-            if (fsum != nullptr) { accf += vv; }
+        double p = 0, a1 = 0, a2 = 0;
+        G4_SIMD_LOOP_WITH(reduction(+:p,a1,a2))
+        for (int k = 0; k < len; k++) {
+            const double sq = v[k] * v[k];
+            p += sq;
+            a1 += sq * w[k];
+            a2 += sq * w2[k];
         }
-        double re = 0;
-        double im = 0;
-        for (; k < len; k += 2) {  // interleaved remainder, one complex at a time
-            const double sq = v[k] * v[k] + v[k + 1] * v[k + 1];
-            pow_ += sq;
-            x1_ += sq * w[k];
-            x2_ += sq * w2[k];
-            re += v[k];
-            im += v[k + 1];
-        }
-        pow_ += accp.sum();
-        x1_ += acc1.sum();
-        x2_ += acc2.sum();
+        pow_ += p;
+        x1_ += a1;
+        x2_ += a2;
         if (fsum != nullptr) {
-            static_assert(dbatch_width % 2 == 0, "lane parity needs an even batch");
-            for (int l = 0; l < dbatch_width; l += 2) {
-                re += accf(l);
-                im += accf(l + 1);
+            double re = 0, im = 0;
+            G4_SIMD_LOOP_WITH(reduction(+:re,im))
+            for (int k = 0; k < len; k += 2) {
+                re += v[k];
+                im += v[k + 1];
             }
             *fsum += complex<double>(re, im);
         }
@@ -896,24 +844,6 @@ void DiagField::getValues(Field *field,std::map<std::string,std::vector<double> 
         if (do_fft){
             std::copy(slice.begin(), slice.end(), in);
             fftw_execute(p);
-            // === original: spectrum moments (master 5b34ee6) ===
-            // for (int iy=0;iy<ngrid;iy++){
-            //     double dy=static_cast<double>(iy)+shift;
-            //     for (int ix=0;ix<ngrid;ix++){
-            //         double dx=static_cast<double>(ix)+shift;
-            //         int iiy=(iy+(ngrid+1)/2) % ngrid;
-            //         int iix=(ix+(ngrid+1)/2) % ngrid;
-            //         int ii=iiy*ngrid+iix;
-            //         loc=out[ii];
-            //         double wei=loc.real()*loc.real()+loc.imag()*loc.imag();
-            //         fpower+=wei;
-            //         fx1+=dx*wei;
-            //         fx2+=dx*dx*wei;
-            //         fy1+=dy*wei;
-            //         fy2+=dy*dy*wei;
-            //     }
-            // }
-            // === end original ===
             // moments of the fftshift-ed spectrum: source column (ix+h)%ngrid
             // splits each row into two contiguous segments
             const int h = (ngrid + 1) / 2;

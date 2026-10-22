@@ -178,7 +178,6 @@ bool ReadBeamHDF5::readSlice(double s, Particles *slice, double *current, bool o
   for (int i=0;i<nsize;i++){
     slice->at(i).py=work[i]*wei;
   }
-  slice->repad();  // filled by index after resize
 
   return true;
 }

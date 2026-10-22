@@ -39,9 +39,7 @@ jobs:
             libfftw3-mpi-dev \
             libhdf5-openmpi-dev \
             libopenmpi-dev \
-            openmpi-bin \
-            libeigen3-dev \
-            libxsimd-dev
+            openmpi-bin
 
       - name: Install system dependencies (Ubuntu) - MPICH
         if: runner.os == 'Linux' && matrix.mpi == 'mpich'
@@ -57,9 +55,7 @@ jobs:
             libfftw3-dev \
             libhdf5-mpich-dev \
             libmpich-dev \
-            mpich \
-            libeigen3-dev \
-            libxsimd-dev
+            mpich
 
       - name: Setup MPI environment
         run: |

@@ -28,11 +28,15 @@ class FieldSolverADI : public FieldSolver{
    unsigned int ngrid {0};
    double delz_save {0};
    complex<double> cstep;
-   vector< complex< double > > r,c,cbet,cwet,crsource;
+   vector< complex< double > > c,cbet,cwet,crsource;
+   static constexpr int lanes = 8;                 // rows solved together in the x-implicit half-step
+   vector< complex< double > > rowbuf;             // stencil of the rows being swept
+   vector< complex< double > > laneT;              // a block of rows, transposed
+   vector< complex< double > > prevrow;            // the row above the current block, before it was overwritten
 
    void ADI(vector<complex< double > > &);
-   void tridagx(vector<complex< double > > &);
-   void tridagy(vector<complex< double > > &);
+   void halfStepX(const complex<double> *src, complex<double> *u);
+   void halfStepY(const complex<double> *src, complex<double> *u);
    
 };
 

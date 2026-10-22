@@ -33,6 +33,7 @@ public:
 
 private:
     vector<double> rharm;
+    vector<double> rp_re, rp_im;   // field coupling scratch of the slice being pushed
 
     bool onlyFundamental;
 

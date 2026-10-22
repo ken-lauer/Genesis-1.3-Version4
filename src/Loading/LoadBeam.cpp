@@ -212,7 +212,6 @@ bool LoadBeam::init(int rank, int size, map<string,string> *arg, Beam *beam, Set
       beam->beam[j].at(k).px   =beamslice[k].px;
       beam->beam[j].at(k).py   =beamslice[k].py;
       }
-    beam->beam[j].repad();  // filled by index after resize
   }
 
 

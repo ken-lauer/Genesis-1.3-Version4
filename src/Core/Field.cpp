@@ -1,6 +1,7 @@
 
 #include "Field.h"
 #include "Beam.h"
+#include "SimdMath.h"
 #include "FieldSolverADI.h"
 #include "FieldSolverFFT.h"
 #include <algorithm>
@@ -8,14 +9,7 @@
 
 
 
-Field::~Field(){
-#ifdef FFTW                // release the FFTW plan
-  fftw_destroy_plan(p);
-#endif
-
-  delete[] in;
-  delete[] out;
-}
+Field::~Field() = default;
 
 Field::Field(){
   harm=1;
@@ -56,13 +50,6 @@ void Field::init(int nsize, int ngrid_in, double dgrid_in, double xlambda0, doub
         field[i].resize(ngrid*ngrid); 
     } 
   } 
-
-  in = new complex<double> [ngrid*ngrid];
-  out= new complex<double> [ngrid*ngrid];
-
-#ifdef FFTW
-  p  = fftw_plan_dft_2d(ngrid,ngrid,reinterpret_cast<fftw_complex*>(in),reinterpret_cast<fftw_complex*>(out),FFTW_FORWARD,FFTW_MEASURE);
-#endif
 
   xks=4.*asin(1)/xlambda;
   first=0;                                // pointer to slice which correspond to first in the time window
@@ -159,7 +146,7 @@ void Field::setStepsize(double delz)
 
 }
 
-bool Field::getLLGridpoint(double x, double y, double *wx, double *wy, int *idx){
+bool Field::getLLGridpoint(double x, double y, double *wx, double *wy, int *idx) const {
 
       if ((x>-gridmax) && (x < gridmax) && (y>-gridmax) && (y < gridmax)){
            *wx = (x+gridmax)/dgrid;
@@ -176,53 +163,8 @@ bool Field::getLLGridpoint(double x, double y, double *wx, double *wy, int *idx)
 }
 
 // Source term of one beam slice, shared by the ADI and FFT solvers (which own
-// the crsource grid). Everything is batched except the scatter onto the four
-// surrounding grid points, which stays scalar per lane. The scatter is a side
-// effect, so off-grid lanes and tail lanes (replicas of the last particle)
-// must not deposit.
-//
-// === original: duplicated inline in FieldSolverADI::advance and
-// FieldSolverFFT::advance (master 5b34ee6) ===
-// // clear source term
-// for (int ig = 0; ig < ngrid * ngrid; ig++) {
-//     crsource[ig] = 0;
-// }
-// // constructing source term
-// int harm = field->getHarm();
-// if (und->inUndulator() && field->isEnabled() && (harm % 2 == 1)) { // do not need to calculate for even harmonics
-//     double scl = und->fc(harm) * vacimp * beam->current[ii] * field->xks * delz;
-//     scl /= 4 * eev * static_cast<double>(beam->beam[ii].size()) * field->dgrid * field->dgrid;
-//     complex<double> cpart;
-//     double part, weight, wx, wy;
-//     int idx;
-//
-//     for (auto & particle : beam->beam.at(ii)) {
-//         double x = particle.x;
-//         double y = particle.y;
-//         double theta = static_cast<double>(harm) * particle.theta;
-//         double gamma = particle.gamma;
-//
-//         if (field->getLLGridpoint(x, y, &wx, &wy, &idx)) {
-//
-//             part = sqrt(und->faw2(x, y)) * scl / gamma;
-//             // tmp  should be also normalized with beta parallel
-//             cpart = complex<double>(sin(theta), cos(theta)) * part;
-//
-//             weight = wx * wy;
-//             crsource[idx] += weight * cpart;
-//             weight = (1 - wx) * wy;
-//             idx++;
-//             crsource[idx] += weight * cpart;
-//             weight = wx * (1 - wy);
-//             idx += ngrid - 1;
-//             crsource[idx] += weight * cpart;
-//             weight = (1 - wx) * (1 - wy);
-//             idx++;
-//             crsource[idx] += weight * cpart;
-//         }
-//     }
-// }  // end of source term construction
-// === end original ===
+// the crsource grid): a vectorized pass for each particle's phasor, then the
+// scatter onto the four surrounding grid points, scalar by nature.
 void Field::constructSource(vector<complex<double>> &crsource, Beam *beam,
                             Undulator *und, double delz, unsigned long islice)
 {
@@ -234,41 +176,43 @@ void Field::constructSource(vector<complex<double>> &crsource, Beam *beam,
     double scl = und->fc(harm) * vacimp * beam->current[islice] * xks * delz;
     scl /= 4 * eev * static_cast<double>(beam->beam[islice].size()) * dgrid * dgrid;
 
-    // scatter one particle onto its four surrounding grid points
-    auto deposit = [&](const complex<double> &cpart, double wx, double wy, int idx) {
+    const auto &particles = beam->beam.at(islice);
+    const int np = static_cast<int>(particles.size());
+    const double *__restrict x = particles.x();
+    const double *__restrict y = particles.y();
+    const double *__restrict th = particles.theta();
+    const double *__restrict g = particles.gamma();
+    const UndTransverse utp = und->transverseParams();
+    const double dharm = static_cast<double>(harm);
+    const double gmax = gridmax;
+    source_re.resize(np);
+    source_im.resize(np);
+    double *__restrict re = source_re.data();
+    double *__restrict im = source_im.data();
+
+    G4_SIMD_LOOP
+    for (int ip = 0; ip < np; ip++) {
+        // off-grid particles get 0 so the sqrt stays NaN-free; the scatter skips them
+        const bool on = (x[ip] > -gmax) && (x[ip] < gmax) && (y[ip] > -gmax) && (y[ip] < gmax);
+        const double faw2 = on ? utp.faw2(x[ip], y[ip]) : 0.;
+        double sh, ch;
+        sincos_poly(dharm * th[ip], sh, ch);
+        // tmp  should be also normalized with beta parallel
+        const double part = sqrt(faw2) * scl / g[ip];
+        re[ip] = sh * part;
+        im[ip] = ch * part;
+    }
+
+    for (int ip = 0; ip < np; ip++) {
+        double wx, wy;
+        int idx;
+        if (!getLLGridpoint(x[ip], y[ip], &wx, &wy, &idx)) { continue; }
+        const complex<double> cpart(re[ip], im[ip]);
         crsource[idx] += wx * wy * cpart;
         crsource[idx + 1] += (1 - wx) * wy * cpart;
         idx += ngrid;
         crsource[idx] += wx * (1 - wy) * cpart;
         crsource[idx + 1] += (1 - wx) * (1 - wy) * cpart;
-    };
-
-    const auto &particles = beam->beam.at(islice);
-    const double *x_s = particles.x();
-    const double *y_s = particles.y();
-    const double *th_s = particles.theta();
-    const double *g_s = particles.gamma();
-    const int np = static_cast<int>(particles.size());
-    const UndTransverse utp = und->transverseParams();
-    const double dharm = static_cast<double>(harm);
-
-    for (int ip = 0; ip < np; ip += dbatch_width) {
-        const dbatch x = dbatch::MapAligned(x_s + ip);
-        const dbatch y = dbatch::MapAligned(y_s + ip);
-        dbatch wx, wy, idx;
-        const dmask on = getLLGridpointBatch(x, y, wx, wy, idx);
-        // off-grid lanes get 0 so the sqrt below stays NaN-free
-        const dbatch f2 = on.select(utp.faw2(x, y), 0.);
-        const dbatch harmth = dharm * dbatch::MapAligned(th_s + ip);
-        dbatch sh, ch;
-        sincos(harmth, sh, ch);
-        // tmp  should be also normalized with beta parallel
-        const dbatch part = f2.sqrt() * scl / dbatch::MapAligned(g_s + ip);
-        for_each_lane(on, np - ip,
-                      [&](int l, double wxl, double wyl, double idxl, double re, double im) {
-                          deposit(complex<double>(re, im), wxl, wyl, static_cast<int>(idxl));
-                      },
-                      wx, wy, idx, sh * part, ch * part);
     }
 }
 
@@ -388,266 +332,3 @@ bool Field::harmonicConversion(int harm_in, bool resample)
 
 
 
-//  diagnostic part
-
-
-void Field::diagnostics(bool output)
-{
-
-  if (!output) { return; }
-
-//  double shift=-0.5*static_cast<double> (ngrid);
-  double shift=-0.5*static_cast<double> (ngrid-1);
-
-  complex<double> loc;
-  double loc2[2];
-  int ds=field.size();
-  int ioff=idx*ds;
-
-  double acc_power=0;
-  double acc_x=0;
-  double acc_x2=0;
-  double acc_y=0;
-  double acc_y2=0;
-  double acc_nf=0;
-  double acc_ff=0;
-#ifdef FFTW
-  double acc_tpower=0;
-  double acc_tx=0;
-  double acc_tx2=0;
-  double acc_ty=0;
-  double acc_ty2=0;
-#endif
-
-  double ks=4.*asin(1)/xlambda;
-  double scl=dgrid*eev/ks;
-  double scltheta=xlambda/ngrid/dgrid;
-//  std::cout  << "old: " << scltheta << " " << xlambda << " " << ngrid << std::endl;
-
-  for (int is=0; is < ds; is++){
-    int islice= (is+first) % ds ;   // include the rotation due to slippage
- 
-    double bpower=0;
-    double bxavg=0;
-    double byavg=0;
-    double bxsig=0;
-    double bysig=0;
-    double fpower=0;
-    double fxavg=0;
-    double fyavg=0;
-    double fxsig=0;
-    double fysig=0;
-    double bintensity=0;   
-    double bfarfield=0;
-    double bphinf=0;
-    double bphiff=0;
-    complex<double> ff = complex<double> (0,0);
-
-
-    for (int iy=0;iy<ngrid;iy++){
-      double dy=static_cast<double>(iy)+shift;
-      for (int ix=0;ix<ngrid;ix++){
-        double dx=static_cast<double>(ix)+shift;
-	int i=iy*ngrid+ix;
-        loc=field.at(islice).at(i);
-	    in[i]=loc;   // field for the FFT
-        double wei=loc.real()*loc.real()+loc.imag()*loc.imag();
-        ff+=loc;
-        bpower+=wei;
-        bxavg+=dx*wei;
-        bxsig+=dx*dx*wei;
-        byavg+=dy*wei;
-        bysig+=dy*dy*wei;
-      }
-    }
-
-
-    if (out_global){
-      acc_power+=bpower;
-      acc_x +=bxavg;
-      acc_x2+=bxsig;  
-      acc_y +=byavg;
-      acc_y2+=bysig;
-    }
-    
-    if (bpower>0){
-      bxavg/=bpower;
-      bxsig/=bpower;
-      byavg/=bpower;
-      bysig/=bpower;
-    }
-    bxsig=sqrt(abs(bxsig-bxavg*bxavg));
-    bysig=sqrt(abs(bysig-byavg*byavg));
-
-
-    // calculate the divergence angle
-#ifdef FFTW
-    if (doFFT){
-      fftw_execute(p);
-      for (int iy=0;iy<ngrid;iy++){
-	    double dy=static_cast<double>(iy)+shift;
-	    for (int ix=0;ix<ngrid;ix++){
-	        double dx=static_cast<double>(ix)+shift;
-	        int iiy=(iy+(ngrid+1)/2) % ngrid;
-	        int iix=(ix+(ngrid+1)/2) % ngrid;
-	        int ii=iiy*ngrid+iix;
-	        loc=out[ii];
-	        double wei=loc.real()*loc.real()+loc.imag()*loc.imag();
-	        fpower+=wei;
-	        fxavg+=dx*wei;
-	        fxsig+=dx*dx*wei;
-	        fyavg+=dy*wei;
-	        fysig+=dy*dy*wei;
-	    }
-      }
-
-      if (out_global){
-	    acc_tpower+=fpower;
-	    acc_tx +=fxavg;
-	    acc_tx2+=fxsig;   // bxsig and bysig are in this part still variances
-	    acc_ty +=fyavg;
-	    acc_ty2+=fysig;
-      }
-
-      if (fpower>0){
-	    fxavg/=fpower;
-	    fxsig/=fpower;
-	    fyavg/=fpower;
-	    fysig/=fpower;
-      }
-
-  //    std::cout << "Old: fpower: " << fpower << " fx1: " << fxavg <<  " scltheta: " << scltheta << std::endl;
-      fxsig=sqrt(fabs(fxsig-fxavg*fxavg));
-      fysig=sqrt(fabs(fysig-fyavg*fyavg));
-    }
-
-#endif
-
-
-
-
-
-    bfarfield=ff.real()*ff.real()+ff.imag()*ff.imag();
-    if (bfarfield > 0){
-      bphiff=atan2(ff.imag(),ff.real());
-    }
-    // Cell on the axis; see the same expression in DiagField::getValues. The
-    // older (ngrid*ngrid-1)/2 is the axis only for an odd ngrid.
-    int i=(ngrid/2)*ngrid+(ngrid/2);
-    loc=field.at(islice).at(i);
-    bintensity=loc.real()*loc.real()+loc.imag()*loc.imag();
-    if (bintensity > 0) {
-      bphinf=atan2(loc.imag(),loc.real()); 
-    }
-    if (out_global){
-      acc_ff+=bfarfield;
-      acc_nf+=bintensity;
-    }
-
-
-    bpower*=scl*scl/vacimp; // scale to W
-    bxavg*=dgrid;
-    bxsig*=dgrid;
-    byavg*=dgrid;
-    bysig*=dgrid;
-    bintensity*=eev*eev/ks/ks/vacimp;  // scale to W/m^2
-
-    power[ioff+is]=bpower;
-    if (doSpatial) {
-      xavg[ioff+is] =bxavg;
-      xsig[ioff+is] =bxsig;
-      yavg[ioff+is] =byavg;
-      ysig[ioff+is] =bysig;
-    }
-#ifdef FFTW
-    if (doFFT){
-      txavg[ioff+is]=fxavg*scltheta;
-      txsig[ioff+is]=fxsig*scltheta;
-      tyavg[ioff+is]=fyavg*scltheta;
-      tysig[ioff+is]=fysig*scltheta;
-    }
-#endif
-    nf_intensity[ioff+is]=bintensity;
-    nf_phi[ioff+is]=bphinf;
-    ff_intensity[ioff+is]=bfarfield;
-    ff_phi[ioff+is]=bphiff;
-
-  } 
-  
-  // accumulate all data fromt eh cores
-  double temp=0;
-  int size;      
-  if(out_global) {
-      MPI_Comm_size(MPI_COMM_WORLD, &size);
-      if (size>1){
-	MPI_Allreduce(&acc_power, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_power=temp;
-	MPI_Allreduce(&acc_x, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_x=temp;
-	MPI_Allreduce(&acc_x2, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_x2=temp;
-	MPI_Allreduce(&acc_y, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_y=temp;
-	MPI_Allreduce(&acc_y2, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_y2=temp;
-	MPI_Allreduce(&acc_nf, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_nf=temp;
-	MPI_Allreduce(&acc_ff, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	acc_ff=temp;
-#ifdef FFTW
-	if (doFFT){
-	  MPI_Allreduce(&acc_tpower, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	  acc_tpower=temp;
-	  MPI_Allreduce(&acc_tx, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	  acc_tx=temp;
-	  MPI_Allreduce(&acc_tx2, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	  acc_tx2=temp;
-	  MPI_Allreduce(&acc_ty, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	  acc_ty=temp;
-	  MPI_Allreduce(&acc_ty2, &temp, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-	  acc_ty2=temp;
-	}
-#endif
-      }
-
-      energy[idx]=acc_power*scl*scl/vacimp*slicelength/299792458.0;  // energy 
-      if (acc_power == 0){
-	acc_power=1.;
-      }
-      if (doSpatial){
-        gl_xavg[idx]=acc_x/acc_power;
-        gl_xsig[idx]=acc_x2/acc_power;
-        gl_yavg[idx]=acc_y/acc_power;
-        gl_ysig[idx]=acc_y2/acc_power;
-        gl_xsig[idx]=sqrt(abs(gl_xsig[idx]-gl_xavg[idx]*gl_xavg[idx]));
-        gl_ysig[idx]=sqrt(abs(gl_ysig[idx]-gl_yavg[idx]*gl_yavg[idx]));
-        gl_xavg[idx]*=dgrid;
-        gl_xsig[idx]*=dgrid;
-        gl_yavg[idx]*=dgrid;
-        gl_ysig[idx]*=dgrid;
-      }
-#ifdef FFTW
-      if (doFFT){
-	if (acc_tpower == 0){
-	  acc_tpower=1.;
-	}
-	gl_txavg[idx]=acc_tx/acc_tpower;
-	gl_txsig[idx]=acc_tx2/acc_tpower;
-	gl_tyavg[idx]=acc_ty/acc_tpower;
-	gl_tysig[idx]=acc_ty2/acc_tpower;
-	gl_txsig[idx]=sqrt(abs(gl_txsig[idx]-gl_txavg[idx]*gl_txavg[idx]));
-	gl_tysig[idx]=sqrt(abs(gl_tysig[idx]-gl_tyavg[idx]*gl_tyavg[idx]));
-	gl_txavg[idx]*=scltheta;
-	gl_txsig[idx]*=scltheta;
-	gl_tyavg[idx]*=scltheta;
-	gl_tysig[idx]*=scltheta;
-      }
-#endif
-      double norm=1./double(size*field.size());
-      gl_nf_intensity[idx]=acc_nf*norm*eev*eev/ks/ks/vacimp;
-      gl_ff_intensity[idx]=acc_ff*norm;
-  }
-  
-  idx++;
-  
-}

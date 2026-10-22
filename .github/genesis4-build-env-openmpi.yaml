@@ -8,5 +8,3 @@ dependencies:
   - fftw * mpi_openmpi*
   - hdf5 * mpi_openmpi*
   - openmpi
-  - eigen
-  - xsimd

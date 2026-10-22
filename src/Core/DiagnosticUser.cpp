@@ -4,7 +4,7 @@
 
 #include "Diagnostic.h"
 
-#include "SimdBatch.h"
+#include "SimdMath.h"
 
 //  This source file works as a template  to allow users to add additional output.
 // the definition is already given in the header file "Diagnostic.h"
@@ -90,22 +90,20 @@ void DiagBeamUser::getValues(Beam *beam, std::map<std::string,std::vector<double
             }
             gamavg *= norm;
 
-            // === original: DiagBeamUser::getValues particle loop (master 5b34ee6) ===
-            // for (auto const &par: slice) {
-            //     emod += (par.gamma-gamavg) * complex<double>(cos(par.theta),sin(par.theta));
-            // }
-            // === end original ===
-            // loop over the particles in each slice, sincos batched
+            // loop over the particles in each slice
             {
                 const double *g_s = slice.gamma();
                 const double *th_s = slice.theta();
-                const auto [re, im] = batch_sum<2>(static_cast<int>(slice.size()),
-                                                   [&](int ip) -> std::array<dbatch, 2> {
-                    const dbatch dg = dbatch::MapAligned(g_s + ip) - gamavg;
-                    dbatch s, c;
-                    sincos(dbatch::MapAligned(th_s + ip), s, c);
-                    return {dg * c, dg * s};
-                });
+                const int np = static_cast<int>(slice.size());
+                double re = 0, im = 0;
+                G4_SIMD_LOOP_WITH(reduction(+:re,im))
+                for (int ip = 0; ip < np; ip++) {
+                    const double dg = g_s[ip] - gamavg;
+                    double s, c;
+                    sincos_poly(th_s[ip], s, c);
+                    re += dg * c;
+                    im += dg * s;
+                }
                 emod = complex<double>(re, im);
             }
             emod *= norm;

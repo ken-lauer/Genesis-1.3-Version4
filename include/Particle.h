@@ -8,8 +8,6 @@
 #include <type_traits>
 #include <vector>
 
-#include <Eigen/Core>
-
 using namespace std;
 
 typedef struct{
@@ -21,21 +19,6 @@ typedef struct{
   double py;
 } Particle;
 
-// Component arrays are physically sized to a multiple of this (in doubles) so
-// SIMD kernels can always run whole batches, tail included. Two hardware
-// packets (at least one cache line) per batch, so the serial per-batch
-// dependency chains in the kernels always have a second packet of independent
-// work to overlap with: 8 on NEON/AVX2, 16 on AVX-512. Must be a multiple of
-// every batch width in use - enforced by static_asserts in SimdBatch.h.
-inline constexpr std::size_t particles_simd_pad =
-    std::max<std::size_t>(8, 2 * Eigen::internal::packet_traits<double>::size);
-
-constexpr std::size_t padded_count(std::size_t n)
-{
-    return (n + particles_simd_pad - 1) / particles_simd_pad * particles_simd_pad;
-}
-
-
 // Structure-of-arrays storage for the particles of one beam slice.
 //
 // Element access returns lightweight proxies whose members are references
@@ -46,20 +29,6 @@ constexpr std::size_t padded_count(std::size_t n)
 // Constness is shallow on Ref itself; real read-only protection comes from the
 // const overloads, which hand out ConstRef with const double& members.
 //
-// Padding invariant: the arrays are physically sized to padded_count(size())
-// and the slots in [size(), padded) replicate the last particle. SIMD kernels
-// may therefore always run whole batches: tail lanes compute valid (if
-// redundant) physics and may be stored back freely. Only operations with side
-// effects beyond the arrays themselves - reductions, scatters onto grids -
-// must mask the tail lanes (see batch_sum and tail_mask in SimdBatch.h).
-//
-// The container's own mutators (resize, push_back, pop_back) maintain the
-// invariant. Writes through element proxies do not: bulk fills that resize()
-// and then assign elements by index would leave the padding at the zeros the
-// resize produced (gamma = 0 makes tail lanes compute NaNs) and must call
-// repad() when done. Later proxy writes to existing particles merely leave
-// the padding stale - old, still-finite particle values - which the kernels
-// tolerate.
 class Particles {
 public:
     struct Ref {
@@ -197,22 +166,12 @@ public:
     // desync the six arrays (fatal for the simulation anyway)
     void resize(std::size_t n)
     {
-        const std::size_t phys = padded_count(n);
-        // former pad slots entering the logical range come back zeroed,
-        // matching std::vector<Particle> resize semantics
-        const std::size_t wipe_end = std::min(n, gamma_.size());
-        const std::size_t wipe_begin = std::min(n_, wipe_end);
-        for_each_array([&](dvec &a) {
-            std::fill(a.begin() + wipe_begin, a.begin() + wipe_end, 0.);
-            a.resize(phys);
-        });
+        for_each_array([&](dvec &a) { a.resize(n); });
         n_ = n;
-        repad();
     }
     void reserve(std::size_t n)
     {
-        const std::size_t phys = padded_count(n);
-        for_each_array([&](dvec &a) { a.reserve(phys); });
+        for_each_array([&](dvec &a) { a.reserve(n); });
     }
     void shrink_to_fit()
     {
@@ -225,27 +184,15 @@ public:
     }
     void push_back(const Particle &p)
     {
-        if (gamma_.size() == n_) {
-            // no free pad slot: grow by one pad block, geometrically so that
-            // particle-at-a-time filling (sorting, loading) stays amortized O(1)
-            const std::size_t phys = n_ + particles_simd_pad;
-            for_each_array([&](dvec &a) {
-                if (phys > a.capacity()) { a.reserve(std::max(a.capacity() * 2, phys)); }
-                a.resize(phys);
-            });
-        }
-        gamma_[n_] = p.gamma; theta_[n_] = p.theta;
-        x_[n_] = p.x; y_[n_] = p.y;
-        px_[n_] = p.px; py_[n_] = p.py;
+        gamma_.push_back(p.gamma); theta_.push_back(p.theta);
+        x_.push_back(p.x); y_.push_back(p.y);
+        px_.push_back(p.px); py_.push_back(p.py);
         ++n_;
-        repad();
     }
     void pop_back()
     {
+        for_each_array([&](dvec &a) { a.pop_back(); });
         --n_;
-        const std::size_t phys = padded_count(n_);
-        for_each_array([&](dvec &a) { a.resize(phys); });
-        repad();
     }
     void swap(Particles &o) noexcept
     {
@@ -263,15 +210,7 @@ public:
     const_iterator cbegin() const { return begin(); }
     const_iterator cend() const { return end(); }
 
-    // restore the padding invariant: slots in [n_, padded) replicate particle
-    // n_-1. Call after filling elements by index following a resize().
-    void repad()
-    {
-        if (n_ == 0 || gamma_.size() == n_) { return; }
-        for_each_array([&](dvec &a) { std::fill(a.begin() + n_, a.end(), a[n_ - 1]); });
-    }
-
-    // raw component spans for the SIMD kernels (contiguous, packet-aligned)
+    // raw component spans for the vectorized kernels
     double *gamma() { return gamma_.data(); }
     double *theta() { return theta_.data(); }
     double *x() { return x_.data(); }
@@ -286,10 +225,7 @@ public:
     const double *py() const { return py_.data(); }
 
 private:
-    // Eigen's allocator aligns to EIGEN_MAX_ALIGN_BYTES = AlignedMax, exactly
-    // what the kernels' MapAligned loads assert on every instruction set; the
-    // padding keeps every whole-batch offset into the arrays equally aligned
-    using dvec = std::vector<double, Eigen::aligned_allocator<double>>;
+    using dvec = std::vector<double>;
 
     template <class F>
     void for_each_array(F &&f)

@@ -12,44 +12,7 @@
 
 using namespace std;
 
-// Transverse dependence of the undulator field for one z-step, hoisted out of
-// the per-particle faw/faw2 calls (six indexed loads each) so kernels fetch
-// once per step and evaluate the polynomial on scalars or SIMD batches alike.
-//
-// === original: Undulator::faw / Undulator::faw2 in Undulator.cpp (master 5b34ee6) ===
-// double Undulator::faw2(double x, double y){  // square of the transverse dependence of the undulator field.
-//   double dx=x-ax[istepz];
-//   double dy=y-ay[istepz];
-//   return (1+kx[istepz]*dx*dx+ky[istepz]*dy*dy+2*(gradx[istepz]*dx+grady[istepz]*dy)); // note kx is scaled as XKX*ku*ku in Lattice.cpp, gradx as ku*GRADX.
-// }
-//
-// double Undulator::faw(double x, double y){  // transverse dependence of the undulator field.
-//   double dx=x-ax[istepz];
-//   double dy=y-ay[istepz];
-//   return (1+0.5*(kx[istepz]*dx*dx+ky[istepz]*dy*dy)+gradx[istepz]*dx+grady[istepz]*dy); // note kx is scaled as XKX*ku*ku in Lattice.cpp, gradx as ku*GRADX.
-// }
-// === end original ===
-struct UndTransverse {
-    double ax, ay, kx, ky, gradx, grady;
-
-    // note kx is scaled as XKX*ku*ku in Lattice.cpp, gradx as ku*GRADX
-    template <class T>
-    T faw(const T &x, const T &y) const
-    {
-        const T dx = x - ax;
-        const T dy = y - ay;
-        return 1. + 0.5 * (kx * dx * dx + ky * dy * dy) + gradx * dx + grady * dy;
-    }
-
-    // square of the transverse dependence
-    template <class T>
-    T faw2(const T &x, const T &y) const
-    {
-        const T dx = x - ax;
-        const T dy = y - ay;
-        return 1. + kx * dx * dx + ky * dy * dy + 2. * (gradx * dx + grady * dy);
-    }
-};
+#include "UndTransverse.h"
 
 class Undulator: public HDF5Base{
  public:

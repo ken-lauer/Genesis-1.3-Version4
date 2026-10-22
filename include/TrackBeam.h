@@ -27,6 +27,7 @@ class TrackBeam{
    void applyR56(Beam *, Undulator *, double);
 
  private:
+   vector<double> gammaz;   // gamma*betaz of the slice being tracked
    void matmul(double a[][4], double b[][4]);
 };
 

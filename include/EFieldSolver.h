@@ -27,7 +27,7 @@ public:
     void shortRange(Particles *, double, double, int);
     void longRange(Beam *beam, double gamma, double aw);
     double getEField(unsigned long i);
-    // for batched loads; sized and zeroed through padded_count(npart) by shortRange
+    // the short range space charge field of the slice being pushed
     const double *getEFieldData() const { return ez.data(); }
     bool hasShortRange() const;
     void allocateForOutput(unsigned long nslice);
