@@ -32,7 +32,8 @@ for src in sources:
         print(f"vec-audit: {src} not in compile_commands.json")
         sys.exit(2)
     argv = shlex.split(entry["command"]) if "command" in entry else list(entry["arguments"])
-    compiler_id = "gcc" if re.search(r"g\+\+|gcc", os.path.basename(argv[0])) and "clang" not in argv[0] else "clang"
+    version = subprocess.run([argv[0], "--version"], capture_output=True, text=True).stdout
+    compiler_id = "clang" if "clang" in version.lower() else "gcc"
     remark_flags = (["-fopt-info-vec-optimized-missed"] if compiler_id == "gcc"
                     else ["-Rpass=loop-vectorize", "-Rpass-missed=loop-vectorize"])
     if "-o" in argv:
