@@ -46,7 +46,8 @@ node wasm/test/run-example1.mjs
 ```
 
 This runs Example1 in the module and checks that every step reaches the live
-callback. To compare against a native run, give it an output directory and use
+callback. `node --test wasm/test/deck.test.mjs` covers the deck rewriting used
+by the demo sliders. To compare against a native run, give it an output directory and use
 a Python with `h5py`:
 
 ```sh
@@ -65,6 +66,12 @@ python3 -m http.server 8765
 Then open <http://127.0.0.1:8765/wasm/demo/>. The page runs each simulation in
 a fresh worker (`demo/worker.js`) and plots power, bunching and the transverse
 intensity as the steps arrive.
+
+The sliders rewrite single values in the deck shown under "Input deck"
+(`demo/deck.js`); the text stays the source of truth and can still be edited by
+hand. Releasing a slider starts a new run, and the previous run stays on the
+plots as a dashed line. Add a slider by extending `controls` in
+`demo/index.html`.
 
 ## Using the module
 

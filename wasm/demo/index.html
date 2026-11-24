@@ -28,6 +28,12 @@ details { margin-top:12px; }
 textarea, pre { width:100%; font:12px/1.4 ui-monospace, monospace; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px; }
 textarea { height:220px; resize:vertical; }
 pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
+.controls { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:6px 24px; margin-bottom:12px; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+.controls label { display:grid; grid-template-columns:8.5em 1fr 6.5em; gap:8px; align-items:center; font-size:.9rem; }
+.controls input[type=range] { width:100%; accent-color:var(--accent); }
+.controls output { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+.controls label[hidden] { display:none; }
+.check { display:flex; gap:6px; align-items:center; font-size:.9rem; color:var(--muted); }
 .decks { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
 </style>
 </head>
@@ -41,12 +47,14 @@ pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
   </select>
   <button id="run" class="primary">Run</button>
   <button id="stop" disabled>Stop</button>
+  <label class="check"><input type="checkbox" id="autorun" checked> Run when a slider is released</label>
   <a id="download" hidden>Download output</a>
   <span id="status">Idle</span>
 </div>
+<div class="controls" id="controls"></div>
 <progress id="progress" value="0" max="1"></progress>
 <div class="grid">
-  <figure><figcaption>Radiation power along the undulator (log scale)</figcaption><canvas id="pz"></canvas></figure>
+  <figure><figcaption id="pzCaption">Radiation power along the undulator (log scale)</figcaption><canvas id="pz"></canvas></figure>
   <figure><figcaption id="secondCaption">Bunching along the undulator (log scale)</figcaption><canvas id="second"></canvas></figure>
   <figure><figcaption id="imageCaption">Transverse intensity</figcaption><canvas id="image"></canvas></figure>
 </div>
@@ -56,24 +64,80 @@ pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
 <details><summary>Genesis log</summary><pre id="log"></pre></details>
 </main>
 <script type="module">
+import { getLatticeValue, getNamelistValue, setLatticeValue, setNamelistValue } from "./deck.js";
+
 const $ = (id) => document.getElementById(id);
+const namelist = (name, keys, scale = 1) => ({
+    get: (d) => { const v = getNamelistValue(d.input, name, keys[0]); return v === null ? null : v / scale; },
+    set: (d, v) => { for (const k of keys) d.input = setNamelistValue(d.input, name, k, tidy(v * scale)); },
+});
+const tidy = (v) => Number(v.toPrecision(6));
+// a log control stores log10 of the deck value in the slider
+const controls = [
+    { id: "current", label: "Peak current", unit: "A", min: 500, max: 6000, step: 100, ...namelist("beam", ["current"]) },
+    { id: "delgam", label: "Energy spread", unit: "mc²", min: 0.2, max: 5, step: 0.1, ...namelist("beam", ["delgam"]) },
+    { id: "emit", label: "Emittance", unit: "µm", min: 0.1, max: 1.5, step: 0.05, ...namelist("beam", ["ex", "ey"], 1e-6) },
+    { id: "aw", label: "Undulator aw", unit: "", min: 0.83, max: 0.865, step: 0.0005,
+      get: (d) => getLatticeValue(d.lattice, "UND", "aw"),
+      set: (d, v) => { d.lattice = setLatticeValue(d.lattice, "UND", "aw", tidy(v)); } },
+    { id: "power", label: "Seed power", unit: "W", log: true, min: 1, max: 7, step: 0.25, ...namelist("field", ["power"]) },
+];
 const presets = {
     ex1: { input: "../../examples/Example1-SteadyState/Example1.in", lattice: "../../examples/Example1-SteadyState/Example1.lat" },
     td: { input: "decks/td-small.in", lattice: "../../examples/Example3-TimeDependent/Example3.lat" },
 };
 let worker = null;
 let run = null;
+let previous = null;
 let dirty = false;
+
+const show = (c, v) => (c.log ? v.toExponential(1) : String(tidy(v))) + (c.unit ? ` ${c.unit}` : "");
+
+function buildControls() {
+    for (const c of controls) {
+        const row = document.createElement("label");
+        row.innerHTML = `<span>${c.label}</span><input type="range" min="${c.min}" max="${c.max}" step="${c.step}"><output></output>`;
+        c.row = row;
+        c.slider = row.querySelector("input");
+        c.out = row.querySelector("output");
+        c.slider.oninput = () => {
+            const value = c.log ? 10 ** Number(c.slider.value) : Number(c.slider.value);
+            const deck = { input: $("input").value, lattice: $("lattice").value };
+            c.set(deck, value);
+            $("input").value = deck.input;
+            $("lattice").value = deck.lattice;
+            c.out.textContent = show(c, value);
+        };
+        c.slider.onchange = () => { if ($("autorun").checked) start(); };
+        $("controls").append(row);
+    }
+}
+
+// the text boxes are the source of truth: a control whose value is absent
+// (or zero, for a log control) is hidden rather than guessed
+function syncControls() {
+    const deck = { input: $("input").value, lattice: $("lattice").value };
+    for (const c of controls) {
+        const value = c.get(deck);
+        c.row.hidden = value === null || (c.log && value <= 0);
+        if (c.row.hidden) continue;
+        c.slider.value = c.log ? Math.log10(value) : value;
+        c.out.textContent = show(c, value);
+    }
+}
 
 async function loadPreset() {
     const p = presets[$("preset").value];
     const [input, lattice] = await Promise.all([p.input, p.lattice].map((u) => fetch(u).then((r) => r.text())));
     $("input").value = input;
     $("lattice").value = lattice;
+    previous = null;
+    syncControls();
 }
 
 function start() {
     stop("Stopped");
+    if (run && run.z.length > 1) previous = run;
     const input = $("input").value;
     const latticeName = /^\s*lattice\s*=\s*(\S+)/m.exec(input)?.[1] ?? "lattice.lat";
     run = { z: [], power: [], bunching: [], slices: null, image: null, ns: 1, t0: performance.now(), done: false };
@@ -132,7 +196,7 @@ function setup(canvas, w, h) {
     return { ctx: canvas.getContext("2d"), dpr };
 }
 
-function linePlot(canvas, x, y, { log, xmax, color, xlabel }) {
+function linePlot(canvas, x, y, { log, xmax, color, xlabel, ref }) {
     const { ctx, dpr } = setup(canvas);
     const css = getComputedStyle(document.documentElement);
     const W = canvas.width, H = canvas.height;
@@ -142,7 +206,8 @@ function linePlot(canvas, x, y, { log, xmax, color, xlabel }) {
     ctx.fillStyle = css.getPropertyValue("--muted");
     ctx.strokeStyle = css.getPropertyValue("--line");
     ctx.lineWidth = dpr;
-    const vals = (log ? y.map((v) => (v > 0 ? Math.log10(v) : NaN)) : Array.from(y)).filter(Number.isFinite);
+    const all = ref ? [...y, ...ref.y] : Array.from(y);
+    const vals = (log ? all.map((v) => (v > 0 ? Math.log10(v) : NaN)) : all).filter(Number.isFinite);
     if (!vals.length) return;
     let lo = Math.min(...vals), hi = Math.max(...vals);
     if (log) { lo = Math.floor(lo); hi = Math.max(Math.ceil(hi), lo + 1); } else { lo = 0; hi = hi || 1; }
@@ -160,17 +225,27 @@ function linePlot(canvas, x, y, { log, xmax, color, xlabel }) {
     ctx.textBaseline = "top";
     for (let i = 0; i <= 4; i++) ctx.fillText(((xmax * i) / 4).toPrecision(3), px((xmax * i) / 4), H - m.b + 4 * dpr);
     ctx.fillText(xlabel, (W + m.l) / 2, H - 13 * dpr);
+    const trace = (tx, ty) => {
+        ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < ty.length; i++) {
+            const v = log ? (ty[i] > 0 ? Math.log10(ty[i]) : NaN) : ty[i];
+            if (!Number.isFinite(v)) { pen = false; continue; }
+            pen ? ctx.lineTo(px(tx[i]), py(v)) : ctx.moveTo(px(tx[i]), py(v));
+            pen = true;
+        }
+        ctx.stroke();
+    };
+    if (ref) {
+        ctx.strokeStyle = css.getPropertyValue("--muted");
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.setLineDash([5 * dpr, 4 * dpr]);
+        trace(ref.x, ref.y);
+        ctx.setLineDash([]);
+    }
     ctx.strokeStyle = color;
     ctx.lineWidth = 2 * dpr;
-    ctx.beginPath();
-    let pen = false;
-    for (let i = 0; i < y.length; i++) {
-        const v = log ? (y[i] > 0 ? Math.log10(y[i]) : NaN) : y[i];
-        if (!Number.isFinite(v)) { pen = false; continue; }
-        pen ? ctx.lineTo(px(x[i]), py(v)) : ctx.moveTo(px(x[i]), py(v));
-        pen = true;
-    }
-    ctx.stroke();
+    trace(x, y);
 }
 
 // dark-to-bright sequential ramp, readable on both themes
@@ -196,15 +271,18 @@ function draw() {
     const css = getComputedStyle(document.documentElement);
     const accent = css.getPropertyValue("--accent"), accent2 = css.getPropertyValue("--accent2");
     // the final z is unknown until the run ends: extrapolate from the step count
-    const zmax = (run.z.at(-1) || 1) * (run.done || run.z.length < 2 ? 1 : (run.nz - 1) / (run.z.length - 1));
-    linePlot($("pz"), run.z, run.power, { log: true, xmax: zmax, color: accent, xlabel: "z (m)" });
+    const zrun = (run.z.at(-1) || 1) * (run.done || run.z.length < 2 ? 1 : (run.nz - 1) / (run.z.length - 1));
+    const zmax = Math.max(zrun, previous?.z.at(-1) ?? 0);
+    const dashed = previous ? " · dashed: previous run" : "";
+    $("pzCaption").textContent = `Radiation power along the undulator (log scale)${dashed}`;
+    linePlot($("pz"), run.z, run.power, { log: true, xmax: zmax, color: accent, xlabel: "z (m)", ref: previous && { x: previous.z, y: previous.power } });
     if (run.slices) {
         $("secondCaption").textContent = `Power along the bunch at z = ${run.z.at(-1).toFixed(2)} m`;
         const s = Array.from(run.slices, (_, i) => i);
         linePlot($("second"), s, run.slices, { log: false, xmax: run.ns - 1, color: accent2, xlabel: "slice" });
     } else {
-        $("secondCaption").textContent = "Bunching along the undulator (log scale)";
-        linePlot($("second"), run.z, run.bunching, { log: true, xmax: zmax, color: accent2, xlabel: "z (m)" });
+        $("secondCaption").textContent = `Bunching along the undulator (log scale)${dashed}`;
+        linePlot($("second"), run.z, run.bunching, { log: true, xmax: zmax, color: accent2, xlabel: "z (m)", ref: previous && { x: previous.z, y: previous.bunching } });
     }
     if (run.image) {
         const half = (run.image.gridmax * 1e6).toFixed(0);
@@ -213,6 +291,8 @@ function draw() {
     }
 }
 
+buildControls();
+$("input").oninput = $("lattice").oninput = syncControls;
 $("preset").onchange = loadPreset;
 $("run").onclick = start;
 $("stop").onclick = () => stop("Stopped");
