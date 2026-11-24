@@ -57,13 +57,15 @@ python wasm/test/compare.py native/Example1.out.h5 /tmp/wasm-out/Example1.out.h5
 
 ## Browser demo
 
-Serve the repository root, because the demo loads the decks from `examples/`:
+The build assembles a self-contained copy of the page, the module and the
+example decks in `wasm/build/demo/`, which any static file server can host:
 
 ```sh
-python3 -m http.server 8765
+python3 -m http.server 8765 -d wasm/build/demo
 ```
 
-Then open <http://127.0.0.1:8765/wasm/demo/>. The page runs each simulation in
+Then open <http://127.0.0.1:8765/>. After editing `wasm/demo/`, run
+`./wasm/build.sh` again to refresh the copy. The page runs each simulation in
 a fresh worker (`demo/worker.js`) and plots power, bunching and the transverse
 intensity as the steps arrive.
 
@@ -72,6 +74,16 @@ The sliders rewrite single values in the deck shown under "Input deck"
 hand. Releasing a slider starts a new run, and the previous run stays on the
 plots as a dashed line. Add a slider by extending `controls` in
 `demo/index.html`.
+
+### On GitHub
+
+The `Documentation` workflow (`.github/workflows/gh-pages.yml`) builds the
+module, runs the tests, and publishes the demo next to the manual at `demo/` on
+GitHub Pages. HDF5 and FFTW are cached between runs. The demo is also uploaded
+as the `genesis4-wasm-demo` artifact on every run, including pull requests.
+
+The page links to the commit it was built from; set `G4_REPO_URL` to point
+that link at a fork.
 
 ## Using the module
 

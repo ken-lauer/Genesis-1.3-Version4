@@ -14,9 +14,40 @@ permissions:
   actions: read
 
 jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    name: "Build WebAssembly demo"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache HDF5 and FFTW for wasm
+        uses: actions/cache@v4
+        with:
+          path: |
+            wasm/build/hdf5
+            wasm/build/fftw
+            wasm/build/fftw-src
+          key: wasm-deps-${{ hashFiles('wasm/build.sh') }}
+      - name: Build
+        env:
+          G4_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: ./wasm/build.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test
+        run: |
+          node --test wasm/test/deck.test.mjs
+          node wasm/test/run-example1.mjs 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Upload demo artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: genesis4-wasm-demo
+          path: wasm/build/demo
+
   build:
     runs-on: ubuntu-latest
     name: "Build docs"
+    needs: wasm
     steps:
       - uses: actions/checkout@v4
         with:
@@ -24,10 +55,16 @@ jobs:
       - name: Set up the documentation destination
         run: |
           mkdir site/
+      - name: Add the WebAssembly demo
+        uses: actions/download-artifact@v4
+        with:
+          name: genesis4-wasm-demo
+          path: site/demo
       - uses: docker://pandoc/core:2.9
         with:
           args: >-
             --standalone
+            --include-before-body=wasm/demo/docs-banner.html
             --output=site/index.html
             manual/MANUAL.md
             manual/INSTALLATION.md

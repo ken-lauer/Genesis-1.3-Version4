@@ -1,6 +1,6 @@
 // One Genesis4 run per worker: the module keeps global state between runs, and
 // terminating the worker is the only way to cancel a run.
-import createModule from "../build/genesis4.mjs";
+import createModule from "./genesis4.mjs";
 
 const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
 

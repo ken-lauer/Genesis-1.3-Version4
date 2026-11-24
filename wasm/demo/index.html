@@ -34,6 +34,8 @@ pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
 .controls output { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
 .controls label[hidden] { display:none; }
 .check { display:flex; gap:6px; align-items:center; font-size:.9rem; color:var(--muted); }
+footer { margin-top:20px; font-size:.8rem; color:var(--muted); }
+footer a { color:var(--accent); }
 .decks { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
 </style>
 </head>
@@ -62,6 +64,12 @@ pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
   <div class="decks"><textarea id="input" spellcheck="false"></textarea><textarea id="lattice" spellcheck="false"></textarea></div>
 </details>
 <details><summary>Genesis log</summary><pre id="log"></pre></details>
+<footer>
+  Genesis 1.3 Version 4, compiled to WebAssembly and running in this browser tab on one thread.
+  Free software under the <a href="LICENSE">GNU General Public License v3</a>;
+  built from <a href="@REPO_URL@/tree/@GIT_HASH@">commit @GIT_SHORT@</a>.
+  Includes FFTW (GPL) and HDF5 (BSD-style licence).
+</footer>
 </main>
 <script type="module">
 import { getLatticeValue, getNamelistValue, setLatticeValue, setNamelistValue } from "./deck.js";
@@ -83,8 +91,8 @@ const controls = [
     { id: "power", label: "Seed power", unit: "W", log: true, min: 1, max: 7, step: 0.25, ...namelist("field", ["power"]) },
 ];
 const presets = {
-    ex1: { input: "../../examples/Example1-SteadyState/Example1.in", lattice: "../../examples/Example1-SteadyState/Example1.lat" },
-    td: { input: "decks/td-small.in", lattice: "../../examples/Example3-TimeDependent/Example3.lat" },
+    ex1: { input: "decks/Example1.in", lattice: "decks/Example1.lat" },
+    td: { input: "decks/td-small.in", lattice: "decks/Example3.lat" },
 };
 let worker = null;
 let run = null;

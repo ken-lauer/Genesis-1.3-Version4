@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build genesis4 for WebAssembly with the emscripten/emsdk Docker image.
-# Outputs: wasm/build/genesis4.{mjs,wasm} (browser/worker/node module) and
-# wasm/build/genesis4-node.{js,wasm} (node CLI on the host file system).
+# Outputs: wasm/build/genesis4.{mjs,wasm} (browser/worker/node module),
+# wasm/build/genesis4-node.{js,wasm} (node CLI on the host file system) and
+# wasm/build/demo/ (the self-contained demo page, ready for a static server).
 set -euo pipefail
 EMSDK_IMAGE=${EMSDK_IMAGE:-emscripten/emsdk:7.0.1}
 HDF5_URL=https://github.com/usnistgov/libhdf5-wasm/releases/download/v0.6.0_4.0.23/HDF5-1.14.6-Emscripten.tar.gz
@@ -25,7 +26,11 @@ if [[ ${1:-} != --in-container ]]; then
         -e "s/@_user_name@/emscripten/" -e "s/@_config_time@/$(date -u '+%Y-%m-%d %H:%M:%S [UTC]')/" \
         -e "s/@GIT_HASH@/$(git -C "$root" log -1 --pretty=format:%H)/" \
         "$root/include/version.h.in" > "$build/include/version.h"
-    exec docker run --rm -v "$root":/src "$EMSDK_IMAGE" /src/wasm/build.sh --in-container
+    # the demo page links to the source it was built from (GPL)
+    exec docker run --rm -v "$root":/src \
+        -e G4_COMMIT="$(git -C "$root" log -1 --pretty=format:%H)" \
+        -e G4_REPO_URL="${G4_REPO_URL:-https://github.com/svenreiche/Genesis-1.3-Version4}" \
+        "$EMSDK_IMAGE" /src/wasm/build.sh --in-container
 fi
 
 B=/src/wasm/build
@@ -66,4 +71,12 @@ LINK="-O3 -fwasm-exceptions -msimd128 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4
 em++ $LINK $B/obj/*.o $LIBS -sNODERAWFS=1 -sENVIRONMENT=node -o $B/genesis4-node.js
 em++ $LINK $B/obj/*.o $LIBS -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=web,worker,node \
     -sINVOKE_RUN=0 -sEXIT_RUNTIME=0 -sEXPORTED_RUNTIME_METHODS=callMain,FS -o $B/genesis4.mjs
-ls -l $B/genesis4*
+
+D=$B/demo
+rm -rf $D && mkdir -p $D/decks
+cp /src/wasm/demo/worker.js /src/wasm/demo/deck.js $B/genesis4.mjs $B/genesis4.wasm /src/LICENSE $D/
+sed -e "s|@REPO_URL@|$G4_REPO_URL|" -e "s|@GIT_HASH@|$G4_COMMIT|" -e "s|@GIT_SHORT@|${G4_COMMIT:0:7}|" \
+    /src/wasm/demo/index.html > $D/index.html
+cp /src/wasm/demo/decks/* /src/examples/Example1-SteadyState/Example1.in \
+    /src/examples/Example1-SteadyState/Example1.lat /src/examples/Example3-TimeDependent/Example3.lat $D/decks/
+ls -l $B/genesis4* $D
