@@ -141,6 +141,7 @@ add_library(genesis13 STATIC
         src/Core/Undulator.cpp
         src/Core/Diagnostic.cpp
         src/Core/DiagnosticUser.cpp
+        src/Core/DiagnosticLive.cpp
         src/IO/HDF5base.cpp
         src/IO/Output.cpp
         src/IO/readBeamHDF5.cpp

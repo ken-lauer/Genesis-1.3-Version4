@@ -95,6 +95,9 @@ bool Gencore::run(Beam *beam, vector<Field*> *field, Setup *setup, Undulator *un
     if (rank==0) { cout << "Initial analysis of electron beam and radiation field..."  << endl; }
     diag.init(rank, size, und->outlength(), beam->beam.size(),field->size(),isTime,isScan,filter);
     diag.calc(beam, field, und->getz());  // initial calculation
+#ifdef __EMSCRIPTEN__
+    diag.emitLive(field);
+#endif
 
 	/*************/
 	/* MAIN LOOP */
@@ -156,6 +159,9 @@ bool Gencore::run(Beam *beam, vector<Field*> *field, Setup *setup, Undulator *un
 
 	  if (und->outstep()) {
 	    diag.calc(beam, field, und->getz());
+#ifdef __EMSCRIPTEN__
+	    diag.emitLive(field);
+#endif
 	  }
 	}
      

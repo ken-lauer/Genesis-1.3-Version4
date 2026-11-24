@@ -102,6 +102,9 @@ public:
     void init(int,int, int, int,int,bool,bool, FilterDiagnostics &);
     void calc(Beam *, std::vector<Field*> *,double);
     bool writeToOutputFile(Beam *, vector<Field*> *, Setup *, Undulator *);
+#ifdef __EMSCRIPTEN__
+    void emitLive(std::vector<Field*> *) const;
+#endif
 
     std::vector<std::map<std::string,std::vector<double> > > val;
     std::vector<std::map<std::string,std::string > >units;
