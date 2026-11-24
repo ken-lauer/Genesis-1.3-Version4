@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Genesis4 in the browser</title>
+<style>
+:root { --bg:#fbfaf7; --panel:#fff; --ink:#1d1f23; --muted:#6a6f78; --line:#d9d6cf; --accent:#0b6e99; --accent2:#b4530a; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#15171a; --panel:#1d2024; --ink:#e7e5e0; --muted:#989ca5; --line:#33373d; --accent:#5cc0e6; --accent2:#f0a35c; }
+}
+* { box-sizing: border-box; }
+body { margin:0; padding:16px; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, sans-serif; }
+main { max-width:1100px; margin:0 auto; }
+h1 { font-size:1.25rem; margin:0 0 12px; }
+.bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+select, button { font:inherit; padding:6px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--ink); }
+button.primary { background:var(--accent); border-color:var(--accent); color:var(--bg); font-weight:600; }
+button:disabled { opacity:.45; }
+#status { color:var(--muted); font-variant-numeric:tabular-nums; }
+progress { width:100%; height:6px; margin-bottom:12px; accent-color:var(--accent); }
+.grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
+figure { margin:0; padding:10px; background:var(--panel); border:1px solid var(--line); border-radius:8px; }
+figcaption { font-size:.85rem; color:var(--muted); margin-bottom:6px; }
+canvas { display:block; width:100%; aspect-ratio:4/3; }
+#image { image-rendering:pixelated; aspect-ratio:1; }
+details { margin-top:12px; }
+textarea, pre { width:100%; font:12px/1.4 ui-monospace, monospace; background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:6px; padding:8px; }
+textarea { height:220px; resize:vertical; }
+pre { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; }
+.decks { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); gap:12px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Genesis4 in the browser</h1>
+<div class="bar">
+  <select id="preset">
+    <option value="ex1">Example1: steady state</option>
+    <option value="td">Time-dependent SASE, 100 slices</option>
+  </select>
+  <button id="run" class="primary">Run</button>
+  <button id="stop" disabled>Stop</button>
+  <a id="download" hidden>Download output</a>
+  <span id="status">Idle</span>
+</div>
+<progress id="progress" value="0" max="1"></progress>
+<div class="grid">
+  <figure><figcaption>Radiation power along the undulator (log scale)</figcaption><canvas id="pz"></canvas></figure>
+  <figure><figcaption id="secondCaption">Bunching along the undulator (log scale)</figcaption><canvas id="second"></canvas></figure>
+  <figure><figcaption id="imageCaption">Transverse intensity</figcaption><canvas id="image"></canvas></figure>
+</div>
+<details><summary>Input deck</summary>
+  <div class="decks"><textarea id="input" spellcheck="false"></textarea><textarea id="lattice" spellcheck="false"></textarea></div>
+</details>
+<details><summary>Genesis log</summary><pre id="log"></pre></details>
+</main>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const presets = {
+    ex1: { input: "../../examples/Example1-SteadyState/Example1.in", lattice: "../../examples/Example1-SteadyState/Example1.lat" },
+    td: { input: "decks/td-small.in", lattice: "../../examples/Example3-TimeDependent/Example3.lat" },
+};
+let worker = null;
+let run = null;
+let dirty = false;
+
+async function loadPreset() {
+    const p = presets[$("preset").value];
+    const [input, lattice] = await Promise.all([p.input, p.lattice].map((u) => fetch(u).then((r) => r.text())));
+    $("input").value = input;
+    $("lattice").value = lattice;
+}
+
+function start() {
+    stop("Stopped");
+    const input = $("input").value;
+    const latticeName = /^\s*lattice\s*=\s*(\S+)/m.exec(input)?.[1] ?? "lattice.lat";
+    run = { z: [], power: [], bunching: [], slices: null, image: null, ns: 1, t0: performance.now(), done: false };
+    $("log").textContent = "";
+    $("download").hidden = true;
+    $("run").disabled = true;
+    $("stop").disabled = false;
+    worker = new Worker("worker.js", { type: "module" });
+    worker.onmessage = ({ data }) => handlers[data.type](data);
+    worker.onerror = (e) => stop(`Worker error: ${e.message}`);
+    worker.postMessage({ files: { "run.in": input, [latticeName]: $("lattice").value }, input: "run.in", fieldEvery: 4 });
+}
+
+function stop(message) {
+    if (!worker) return;
+    worker.terminate();
+    worker = null;
+    $("run").disabled = false;
+    $("stop").disabled = true;
+    $("status").textContent = message;
+}
+
+const handlers = {
+    log({ line }) {
+        $("log").textContent += line + "\n";
+    },
+    step({ iz, nz, ns, z, power, meanPower, meanBunching, image }) {
+        run.z.push(z);
+        run.power.push(meanPower);
+        run.bunching.push(meanBunching);
+        run.ns = ns;
+        run.nz = nz;
+        if (ns > 1) run.slices = power;
+        if (image) run.image = image;
+        $("progress").value = (iz + 1) / nz;
+        $("status").textContent = `z = ${z.toFixed(2)} m · P = ${meanPower.toExponential(2)} W · ${((performance.now() - run.t0) / 1000).toFixed(1)} s`;
+        dirty = true;
+    },
+    done({ rc, seconds, name, output }) {
+        run.done = true;
+        if (output) {
+            const link = $("download");
+            link.href = URL.createObjectURL(new Blob([output]));
+            link.download = name;
+            link.hidden = false;
+        }
+        stop(rc === 0 ? `Done in ${seconds.toFixed(1)} s · final P = ${run.power.at(-1).toExponential(2)} W` : `Genesis exited with code ${rc}`);
+    },
+};
+
+function setup(canvas, w, h) {
+    const dpr = devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = w ?? Math.round(rect.width * dpr);
+    canvas.height = h ?? Math.round(rect.height * dpr);
+    return { ctx: canvas.getContext("2d"), dpr };
+}
+
+function linePlot(canvas, x, y, { log, xmax, color, xlabel }) {
+    const { ctx, dpr } = setup(canvas);
+    const css = getComputedStyle(document.documentElement);
+    const W = canvas.width, H = canvas.height;
+    const m = { l: 52 * dpr, r: 8 * dpr, t: 8 * dpr, b: 30 * dpr };
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = `${11 * dpr}px system-ui, sans-serif`;
+    ctx.fillStyle = css.getPropertyValue("--muted");
+    ctx.strokeStyle = css.getPropertyValue("--line");
+    ctx.lineWidth = dpr;
+    const vals = (log ? y.map((v) => (v > 0 ? Math.log10(v) : NaN)) : Array.from(y)).filter(Number.isFinite);
+    if (!vals.length) return;
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (log) { lo = Math.floor(lo); hi = Math.max(Math.ceil(hi), lo + 1); } else { lo = 0; hi = hi || 1; }
+    const px = (v) => m.l + (v / xmax) * (W - m.l - m.r);
+    const py = (v) => H - m.b - ((v - lo) / (hi - lo)) * (H - m.t - m.b);
+    const nticks = log ? Math.min(hi - lo, 6) : 4;
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i <= nticks; i++) {
+        const v = lo + ((hi - lo) * i) / nticks;
+        ctx.beginPath(); ctx.moveTo(m.l, py(v)); ctx.lineTo(W - m.r, py(v)); ctx.stroke();
+        ctx.fillText(log ? `1e${Math.round(v)}` : v.toExponential(1), m.l - 6 * dpr, py(v));
+    }
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let i = 0; i <= 4; i++) ctx.fillText(((xmax * i) / 4).toPrecision(3), px((xmax * i) / 4), H - m.b + 4 * dpr);
+    ctx.fillText(xlabel, (W + m.l) / 2, H - 13 * dpr);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath();
+    let pen = false;
+    for (let i = 0; i < y.length; i++) {
+        const v = log ? (y[i] > 0 ? Math.log10(y[i]) : NaN) : y[i];
+        if (!Number.isFinite(v)) { pen = false; continue; }
+        pen ? ctx.lineTo(px(x[i]), py(v)) : ctx.moveTo(px(x[i]), py(v));
+        pen = true;
+    }
+    ctx.stroke();
+}
+
+// dark-to-bright sequential ramp, readable on both themes
+const ramp = [[0, 0, 4], [66, 10, 104], [147, 38, 103], [221, 81, 58], [252, 165, 10], [252, 255, 164]];
+function drawImage(canvas, { ngrid, data }) {
+    const { ctx } = setup(canvas, ngrid, ngrid);
+    const img = ctx.createImageData(ngrid, ngrid);
+    let max = 0;
+    for (const v of data) if (v > max) max = v;
+    for (let i = 0; i < data.length; i++) {
+        const t = max > 0 ? Math.sqrt(data[i] / max) * (ramp.length - 1) : 0;
+        const k = Math.min(Math.floor(t), ramp.length - 2), f = t - k;
+        for (let c = 0; c < 3; c++) img.data[4 * i + c] = ramp[k][c] + f * (ramp[k + 1][c] - ramp[k][c]);
+        img.data[4 * i + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+}
+
+function draw() {
+    requestAnimationFrame(draw);
+    if (!dirty || !run) return;
+    dirty = false;
+    const css = getComputedStyle(document.documentElement);
+    const accent = css.getPropertyValue("--accent"), accent2 = css.getPropertyValue("--accent2");
+    // the final z is unknown until the run ends: extrapolate from the step count
+    const zmax = (run.z.at(-1) || 1) * (run.done || run.z.length < 2 ? 1 : (run.nz - 1) / (run.z.length - 1));
+    linePlot($("pz"), run.z, run.power, { log: true, xmax: zmax, color: accent, xlabel: "z (m)" });
+    if (run.slices) {
+        $("secondCaption").textContent = `Power along the bunch at z = ${run.z.at(-1).toFixed(2)} m`;
+        const s = Array.from(run.slices, (_, i) => i);
+        linePlot($("second"), s, run.slices, { log: false, xmax: run.ns - 1, color: accent2, xlabel: "slice" });
+    } else {
+        $("secondCaption").textContent = "Bunching along the undulator (log scale)";
+        linePlot($("second"), run.z, run.bunching, { log: true, xmax: zmax, color: accent2, xlabel: "z (m)" });
+    }
+    if (run.image) {
+        const half = (run.image.gridmax * 1e6).toFixed(0);
+        $("imageCaption").textContent = `Transverse intensity, slice ${run.image.slice} (±${half} µm, square-root scale)`;
+        drawImage($("image"), run.image);
+    }
+}
+
+$("preset").onchange = loadPreset;
+$("run").onclick = start;
+$("stop").onclick = () => stop("Stopped");
+await loadPreset();
+requestAnimationFrame(draw);
+window.g4demo = { get run() { return run; } };
+if (new URLSearchParams(location.search).has("autorun")) start();
+</script>
+</body>
+</html>
