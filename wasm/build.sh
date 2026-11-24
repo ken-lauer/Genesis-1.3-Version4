@@ -56,8 +56,10 @@ compile() {
     em++ $CXXFLAGS $extra -c "$1" -o "$obj"
 }
 export -f compile
-# the plugin interface needs dlopen
-ls /src/src/*/*.cpp | grep -vE "RegPlugin|DiagnosticHook" | xargs -P "$(nproc)" -I{} bash -c 'compile {}'
+# the genesis13 library sources from CMakeLists.txt: the tree also holds files
+# that are not built, and the optional plugin interface (dlopen) stays out
+grep -oE '^[[:space:]]+src/[A-Za-z0-9_/]+\.cpp' /src/CMakeLists.txt | sed 's|^[[:space:]]*|/src/|' \
+    | xargs -P "$(nproc)" -I{} bash -c 'compile {}'
 
 LIBS="$B/fftw/lib/libfftw3.a $B/hdf5/lib/libhdf5.a $B/hdf5/lib/libszaec.a $B/hdf5/lib/libaec.a $B/hdf5/lib/libzlib-static.a"
 LINK="-O3 -fwasm-exceptions -msimd128 -sALLOW_MEMORY_GROWTH=1 -sMAXIMUM_MEMORY=4GB -sSTACK_SIZE=5MB"
