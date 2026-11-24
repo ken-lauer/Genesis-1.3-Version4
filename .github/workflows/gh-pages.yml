@@ -98,7 +98,10 @@ jobs:
         with:
           path: ./site
   deploy:
-    if: ${{ github.repository_owner == 'svenreiche' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags')) }}
+    # ken-lauer/wasm-spike: temporary, to test the WebAssembly demo on a fork
+    if: >-
+      ${{ (github.repository_owner == 'svenreiche' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags')))
+      || (github.repository_owner == 'ken-lauer' && github.ref == 'refs/heads/wasm-spike' && github.event_name == 'push') }}
     needs: build
     name: "Deploy docs"
 
